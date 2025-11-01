@@ -14,7 +14,8 @@ class LASProcessorToBin:
                  output_dir: Union[str, Path] = None,
                  window_size: Tuple[float, float] = (50.0, 50.0),
                  min_points: Optional[int] = 1000,
-                 max_points: Optional[int] = 5000):
+                 max_points: Optional[int] = 5000,
+                 overlap: bool = False):
         """
         Initialize LAS point cloud processor that saves to bin+pkl format.
         
@@ -24,12 +25,14 @@ class LASProcessorToBin:
             window_size: (x_size, y_size) for rectangular windows (in units of the LAS file)
             min_points: Minimum points threshold for a valid segment (None to skip)
             max_points: Maximum points threshold before further segmentation (None to skip)
+            overlap: Whether to use overlap mode (offset grid by half window size)
         """
         self.input_path = Path(input_path)
         self.output_dir = Path(output_dir) if output_dir else self.input_path.parent
         self.window_size = window_size
         self.min_points = min_points
         self.max_points = max_points
+        self.overlap = overlap
         
         if not self.output_dir.exists():
             self.output_dir.mkdir(parents=True)
@@ -45,15 +48,20 @@ class LASProcessorToBin:
         else:
             raise ValueError(f"Input path {self.input_path} is not a valid LAS file or directory")
     
-    def process_all_files(self, use_parallel: bool = True, max_workers: int = None):
+    def process_all_files(self, n_workers: int = None):
         """
         Process all discovered LAS files.
+        并行处理在单个LAS文件内部进行，而不是跨文件并行。
         
         Args:
-            use_parallel: Whether to use parallel processing
-            max_workers: Maximum number of parallel workers (None = auto)
+            n_workers: Number of parallel workers for segment processing (None = auto)
         """
         import time
+        import multiprocessing
+        
+        if n_workers is None:
+            n_workers = max(1, multiprocessing.cpu_count() - 1)
+        
         start_time = time.time()
         
         print("="*70)
@@ -63,38 +71,19 @@ class LASProcessorToBin:
         print(f"Window size: {self.window_size}")
         print(f"Min points: {self.min_points}")
         print(f"Max points: {self.max_points}")
+        print(f"Overlap mode: {'✅ Enabled' if self.overlap else '❌ Disabled'}")
+        print(f"Parallel workers: {n_workers} (per file)")
+        print("-"*70)
         
-        if use_parallel and len(self.las_files) > 1:
-            from concurrent.futures import ProcessPoolExecutor, as_completed
-            import multiprocessing
-            
-            if max_workers is None:
-                max_workers = max(1, min(multiprocessing.cpu_count() - 1, len(self.las_files)))
-            
-            print(f"Parallel processing: {max_workers} workers")
-            print("-"*70)
-            
-            completed_files = []
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(self._process_file_wrapper, las_file): las_file 
-                          for las_file in self.las_files}
-                
-                with tqdm(total=len(self.las_files), desc="Progress", unit="file", 
-                         bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]') as pbar:
-                    for future in as_completed(futures):
-                        las_file = futures[future]
-                        try:
-                            future.result()
-                            completed_files.append(las_file.name)
-                        except Exception as e:
-                            print(f"\n[ERROR] {las_file.name}: {e}")
-                        pbar.update(1)
-        else:
-            print("Serial processing")
-            print("-"*70)
-            for las_file in tqdm(self.las_files, desc="Progress", unit="file",
-                                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'):
-                self.process_file(las_file)
+        # 顺序处理每个文件，但文件内部并行处理segments
+        for las_file in tqdm(self.las_files, desc="Processing files", unit="file",
+                            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'):
+            try:
+                self.process_file(las_file, n_workers=n_workers)
+            except Exception as e:
+                print(f"\n[ERROR] {las_file.name}: {e}")
+                import traceback
+                traceback.print_exc()
         
         elapsed_time = time.time() - start_time
         print("\n" + "="*70)
@@ -103,55 +92,129 @@ class LASProcessorToBin:
         print(f"Average: {elapsed_time/len(self.las_files):.2f}s per file")
         print("="*70)
     
-    def _process_file_wrapper(self, las_file: Path):
-        """Wrapper for parallel processing."""
-        import sys
-        import os
-        # 重定向输出到null，避免并行处理时输出混乱
-        original_stdout = sys.stdout
-        original_stderr = sys.stderr
-        try:
-            sys.stdout = open(os.devnull, 'w')
-            sys.stderr = open(os.devnull, 'w')
-            self.process_file(las_file)
-        finally:
-            sys.stdout.close()
-            sys.stderr.close()
-            sys.stdout = original_stdout
-            sys.stderr = original_stderr
-    
-    def process_file(self, las_file: Union[str, Path]):
-        """Process a single LAS file and save to bin+pkl format."""
+    def process_file(self, las_file: Union[str, Path], n_workers: int = 4):
+        """
+        Process a single LAS file and save to bin+pkl format.
+        
+        Args:
+            las_file: Path to LAS file
+            n_workers: Number of parallel workers for segment processing
+        """
+        import time
         las_file = Path(las_file)
         
+        file_start = time.time()
+        print(f"\n{'='*70}")
+        print(f"📄 Processing: {las_file.name}")
+        print(f"{'='*70}")
+        
+        # 1. 读取LAS文件
+        t0 = time.time()
         with laspy.open(las_file) as fh:
             las_data = fh.read()
+        t1 = time.time()
+        print(f"  ✓ 读取LAS文件: {t1-t0:.2f}s ({len(las_data.points):,} 点)")
         
-        # Get all points
+        # 2. 准备点云数据
+        t0 = time.time()
         point_data = np.vstack((
             las_data.x, 
             las_data.y, 
             las_data.z
         )).transpose()
+        t1 = time.time()
+        print(f"  ✓ 准备点云数据: {t1-t0:.2f}s")
         
-        # Perform segmentation
-        segments = self.segment_point_cloud(point_data)
+        # 3. 分割处理（这里会有详细子阶段输出）
+        t0 = time.time()
+        segments = self.segment_point_cloud(point_data, n_workers=n_workers)
+        t1 = time.time()
+        print(f"  ✓ 总分割时间: {t1-t0:.2f}s → {len(segments)} segments")
         
-        # Save to bin and pkl format
+        # 4. 保存文件
+        t0 = time.time()
         self.save_segments_as_bin_pkl(las_file, las_data, segments)
+        t1 = time.time()
+        print(f"  ✓ 保存文件: {t1-t0:.2f}s")
+        
+        file_total = time.time() - file_start
+        print(f"  🎯 总计: {file_total:.2f}s")
+        print(f"{'='*70}")
     
-    def segment_point_cloud(self, points: np.ndarray) -> List[np.ndarray]:
-        """Segment point cloud into tiles based on window size."""
+    def segment_point_cloud(self, points: np.ndarray, n_workers: int = 4) -> List[np.ndarray]:
+        """
+        Segment point cloud into tiles based on window size.
+        
+        Args:
+            points: Point cloud array (N, 3)
+            n_workers: Number of parallel workers
+            
+        Returns:
+            List of segment indices
+        """
+        import time
+        
+        print(f"  📦 开始分割 ({n_workers} workers)...")
+        
+        if not self.overlap:
+            # 正常模式：单次网格分割
+            t0 = time.time()
+            segments = self._grid_segmentation(points, offset_x=0, offset_y=0, n_workers=n_workers)
+            t1 = time.time()
+            print(f"     单次网格分割: {t1-t0:.2f}s")
+            return segments
+        else:
+            # Overlap模式：两次网格分割（偏移半个窗口）
+            x_size, y_size = self.window_size
+            
+            # 第一次分割：正常网格
+            t0 = time.time()
+            segments1 = self._grid_segmentation(points, offset_x=0, offset_y=0, n_workers=n_workers)
+            t1 = time.time()
+            print(f"     第1次网格分割: {t1-t0:.2f}s → {len(segments1)} segments")
+            
+            # 第二次分割：偏移半个窗口
+            t0 = time.time()
+            segments2 = self._grid_segmentation(points, offset_x=x_size/2, offset_y=y_size/2, n_workers=n_workers)
+            t1 = time.time()
+            print(f"     第2次网格分割: {t1-t0:.2f}s → {len(segments2)} segments")
+            
+            # 合并两次分割结果
+            all_segments = segments1 + segments2
+            
+            return all_segments
+    
+    def _grid_segmentation(self, points: np.ndarray, offset_x: float = 0, offset_y: float = 0, n_workers: int = 4) -> List[np.ndarray]:
+        """
+        Perform grid-based segmentation with optional offset.
+        
+        Args:
+            points: Point cloud array (N, 3)
+            offset_x: X offset for grid origin
+            offset_y: Y offset for grid origin
+            n_workers: Number of parallel workers
+            
+        Returns:
+            List of segment indices
+        """
+        import time
+        
+        # 1. 窗口分组
+        t0 = time.time()
         min_x, min_y = np.min(points[:, 0]), np.min(points[:, 1])
         max_x, max_y = np.max(points[:, 0]), np.max(points[:, 1])
         x_size, y_size = self.window_size
         
-        num_windows_x = max(1, int(np.ceil((max_x - min_x) / x_size)))
-        num_windows_y = max(1, int(np.ceil((max_y - min_y) / y_size)))
+        # 应用偏移
+        origin_x = min_x - offset_x
+        origin_y = min_y - offset_y
+        
+        num_windows_x = max(1, int(np.ceil((max_x - origin_x) / x_size)))
+        num_windows_y = max(1, int(np.ceil((max_y - origin_y) / y_size)))
         
         # 计算每个点所属的窗口索引
-        x_bins = np.clip(((points[:, 0] - min_x) / x_size).astype(int), 0, num_windows_x - 1)
-        y_bins = np.clip(((points[:, 1] - min_y) / y_size).astype(int), 0, num_windows_y - 1)
+        x_bins = np.clip(((points[:, 0] - origin_x) / x_size).astype(int), 0, num_windows_x - 1)
+        y_bins = np.clip(((points[:, 1] - origin_y) / y_size).astype(int), 0, num_windows_y - 1)
         
         # 组合窗口索引
         window_ids = x_bins * num_windows_y + y_bins
@@ -159,17 +222,39 @@ class LASProcessorToBin:
         # 分组
         unique_ids, indices = np.unique(window_ids, return_inverse=True)
         segments = [np.where(indices == i)[0] for i in range(len(unique_ids))]
+        t1 = time.time()
+        print(f"       - 窗口分组: {t1-t0:.3f}s → {len(segments)} 窗口")
         
-        # 后续阈值处理
-        if self.max_points is not None:
-            segments = self.apply_max_threshold(points, segments)
+        # 2. Min阈值处理（优先处理，合并边界上点少的无效窗口）
         if self.min_points is not None:
-            segments = self.apply_min_threshold(points, segments)
+            t0 = time.time()
+            before_count = len(segments)
+            segments = self.apply_min_threshold(points, segments, min_threshold=self.min_points)
+            t1 = time.time()
+            print(f"       - Min阈值处理: {t1-t0:.3f}s ({before_count} → {len(segments)} segments)")
+        
+        # 3. Max阈值处理（最后处理）
+        if self.max_points is not None:
+            t0 = time.time()
+            before_count = len(segments)
+            segments = self.apply_max_threshold(points, segments, n_workers=n_workers)
+            t1 = time.time()
+            print(f"       - Max阈值处理: {t1-t0:.3f}s ({before_count} → {len(segments)} segments)")
             
         return segments
     
-    def apply_max_threshold(self, points: np.ndarray, segments: List[np.ndarray]) -> List[np.ndarray]:
-        """Apply max_points threshold to segments, subdividing large segments."""
+    def apply_max_threshold(self, points: np.ndarray, segments: List[np.ndarray], n_workers: int = 4) -> List[np.ndarray]:
+        """
+        Apply max_points threshold to segments, subdividing large segments.
+        
+        Args:
+            points: Point cloud array
+            segments: List of segment indices
+            n_workers: Number of parallel workers
+            
+        Returns:
+            List of processed segment indices
+        """
         large_segment_indices = [i for i, segment in enumerate(segments) if len(segment) > self.max_points]
         
         if not large_segment_indices:
@@ -197,9 +282,9 @@ class LASProcessorToBin:
             return result
         
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        import multiprocessing
         
-        max_workers = max(1, min(multiprocessing.cpu_count(), len(large_segments)))
+        # 使用传入的n_workers参数
+        max_workers = min(n_workers, len(large_segments)) if len(large_segments) > 0 else 1
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(process_segment, segment) for segment in large_segments]
             for future in as_completed(futures):
@@ -207,13 +292,27 @@ class LASProcessorToBin:
         
         return result_segments
     
-    def apply_min_threshold(self, points: np.ndarray, segments: List[np.ndarray]) -> List[np.ndarray]:
-        """Apply min_points threshold using KD-Tree."""
+    def apply_min_threshold(self, points: np.ndarray, segments: List[np.ndarray], 
+                           min_threshold: Optional[int] = None) -> List[np.ndarray]:
+        """
+        Apply min_points threshold using KD-Tree.
+        
+        Args:
+            points: Point cloud array
+            segments: List of segment indices
+            min_threshold: Minimum points threshold (if None, use self.min_points)
+        
+        Returns:
+            List of processed segment indices
+        """
         if len(segments) <= 1:
             return segments
         
+        # 使用传入的min_threshold，如果没有则使用self.min_points
+        effective_min = min_threshold if min_threshold is not None else self.min_points
+        
         centroids = np.array([np.mean(points[segment][:, :2], axis=0) for segment in segments])
-        small_segments = [i for i, segment in enumerate(segments) if len(segment) < self.min_points]
+        small_segments = [i for i, segment in enumerate(segments) if len(segment) < effective_min]
         
         if not small_segments:
             return segments
@@ -249,11 +348,18 @@ class LASProcessorToBin:
             las_data: Original LAS data
             segments: List of index arrays for segments
         """
+        import time
+        
         base_name = las_file.stem
         
         # 准备保存所有点云数据到一个bin文件
         bin_path = self.output_dir / f"{base_name}.bin"
         pkl_path = self.output_dir / f"{base_name}.pkl"
+        
+        print(f"  💾 保存到 bin+pkl...")
+        
+        # 1. 收集字段
+        t0 = time.time()
         
         # 只保存真正有意义数据的字段
         # 必须保存的核心字段
@@ -302,8 +408,15 @@ class LASProcessorToBin:
         for field in fields_to_save:
             structured_array[field] = data_dict[field]
         
-        # 保存为bin文件
+        t1 = time.time()
+        print(f"     - 收集字段: {t1-t0:.3f}s ({len(fields_to_save)} 字段)")
+        
+        # 2. 保存为bin文件
+        t0 = time.time()
         structured_array.tofile(bin_path)
+        t1 = time.time()
+        bin_size_mb = bin_path.stat().st_size / (1024**2)
+        print(f"     - 写入bin: {t1-t0:.3f}s ({bin_size_mb:.1f} MB)")
         
         # 准备pkl文件的元数据
         metadata = {
@@ -315,6 +428,7 @@ class LASProcessorToBin:
             'window_size': self.window_size,
             'min_points': self.min_points,
             'max_points': self.max_points,
+            'overlap': self.overlap,
         }
         
         # 收集完整的LAS头文件信息
@@ -386,7 +500,11 @@ class LASProcessorToBin:
             label_counts = {0: len(las_data.points)}
         metadata['label_counts'] = label_counts
         
-        # 收集每个分块的信息
+        t1 = time.time()
+        print(f"     - 准备metadata: {t1-t0:.3f}s")
+        
+        # 3. 收集每个分块的信息
+        t0 = time.time()
         segments_info = []
         for i, segment_indices in enumerate(segments):
             segment_info = {
@@ -418,16 +536,25 @@ class LASProcessorToBin:
         
         metadata['segments'] = segments_info
         
-        # 保存pkl文件
+        t1 = time.time()
+        print(f"     - 收集segments信息: {t1-t0:.3f}s ({len(segments)} segments)")
+        
+        # 4. 保存pkl文件
+        t0 = time.time()
         with open(pkl_path, 'wb') as f:
             pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
+        t1 = time.time()
+        pkl_size_mb = pkl_path.stat().st_size / (1024**2)
+        print(f"     - 写入pkl: {t1-t0:.3f}s ({pkl_size_mb:.1f} MB)")
 
 
 def process_las_files_to_bin(input_path, output_dir=None, window_size=(50.0, 50.0), 
                               min_points=None, max_points=None,
-                              use_parallel=True, max_workers=None):
+                              overlap=False,
+                              n_workers=None):
     """
     Process LAS files and save to bin+pkl format.
+    并行处理在单个LAS文件内部进行（处理segments），而不是跨文件并行。
     
     Args:
         input_path: Path to LAS file or directory containing LAS files
@@ -435,17 +562,18 @@ def process_las_files_to_bin(input_path, output_dir=None, window_size=(50.0, 50.
         window_size: (x_size, y_size) for rectangular windows
         min_points: Minimum points threshold for a valid segment
         max_points: Maximum points threshold before further segmentation
-        use_parallel: Whether to use parallel processing for multiple files
-        max_workers: Maximum number of parallel workers (None = auto detect)
+        overlap: Whether to use overlap mode (offset grid by half window size)
+        n_workers: Number of parallel workers for segment processing (None = auto, uses CPU count - 1)
     """
     processor = LASProcessorToBin(
         input_path=input_path,
         output_dir=output_dir,
         window_size=window_size,
         min_points=min_points,
-        max_points=max_points
+        max_points=max_points,
+        overlap=overlap
     )
-    processor.process_all_files(use_parallel=use_parallel, max_workers=max_workers)
+    processor.process_all_files(n_workers=n_workers)
 
 
 # 提供一个辅助函数用于加载数据
@@ -504,21 +632,24 @@ def load_all_segments_info(pkl_path: Union[str, Path]) -> List[Dict[str, Any]]:
 
 if __name__ == "__main__":
     # 示例：处理LAS文件
-    input_path = r"E:\data\Dales\dales_las\test"
-    output_dir = r"E:\data\Dales\dales_las\tile_bin\test"
-    window_size = (50.0, 50.0)
+    input_path = r"E:\data\云南遥感中心\第一批\train"
+    output_dir = r"E:\data\云南遥感中心\第一批\bin\train"
+    window_size = (150.0, 150.0)
     min_points = 4096 * 2
     max_points = 4096 * 16 * 2
+    overlap = False
+    use_parallel = True
+    max_workers = None  # 自动检测CPU核心数
     
-    # 处理文件（启用并行处理以加速）
+    # 处理文件（并行处理在单个LAS文件内部进行）
     process_las_files_to_bin(
         input_path=input_path,
         output_dir=output_dir,
         window_size=window_size,
         min_points=min_points,
         max_points=max_points,
-        use_parallel=True,  # 启用并行处理
-        max_workers=None    # 自动检测CPU核心数
+        overlap=overlap,    # 🔥 设置为True启用overlap模式（segment数量约翻倍）
+        n_workers=max_workers # 🔥 并行worker数（None=自动，每个文件内部并行处理segments）
     )
     
     # 示例：如何加载数据

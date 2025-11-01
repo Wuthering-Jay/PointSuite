@@ -85,3 +85,5 @@ PointSuite/
 ***
 ## 日志
 * **2025/10/25**：思考了好几天项目结构应该是怎样的，又想了好几天数据应该是怎样的，最终决定分块成h5，包含一块las的所有头信息再加上分块信息，同时还有这块las所有点个数的统计，每个分块包含的类别，h5似乎要采取blosc这类快速压缩。今天写完分块的代码吧，还得要一个分块转小块las的工具看看分块效果，再看看能不能写一个overlap分块模式，固定50%重叠率好了，省点事情。现在分块只和分块的大小有关了，样本权重、类别权重这些dataloader里面再计算。
+* **2025/10/29**：经过实验，h5通过储存索引再进行分块数据读取的方式太慢了，完全不能满足要求，现在设计了一种新的bin+pkl方式，基于np.memmap进行快速读取，bin存储所有点信息，pkl存储头文件和分块信息，似乎kitti和s3dis也是这种处理方式，现在要把overlap和gridsample加入数据分块过程。
+* **2025/11/01**: bin+pkl的实现已经完成，支持overlap和gridsample模式。现在要考虑的事情很多：1.garbage_bin模式的实现，开启时ignore_lable=0,num_classes+1,class_weights在0的位置要有一个占位数；关闭时ignore_label=-1,其他正常；2.类别映射关系，尤其是引入garbage_bin的类别映射关系；3.classes_weight和sample_weight，在引入garbage_bin模式后也不相同；4.除了sample_weight太大用文件保存，其他参数都写入yaml配置，sample_weight记录文件路径；5.在main.py中要实现训练和测试前的预处理，包括选定exp文件夹位置，保存总yaml，修改总yaml，后续是根据修改后的总yaml来的
