@@ -424,6 +424,273 @@ class ShufflePoint(object):
         np.random.shuffle(shuffle_index)
         data_dict = index_operator(data_dict, shuffle_index)
         return data_dict
+
+
+# ———— Intensity 变换 ————
+# Intensity 归一化
+class NormalizeIntensity(object):
+    def __init__(self, max_value=65535.0):
+        """
+        Normalize intensity to [0, 1]
+        
+        Args:
+            max_value: Maximum possible intensity value (e.g., 65535 for 16-bit, 255 for 8-bit)
+        """
+        self.max_value = max_value
+
+    def __call__(self, data_dict):
+        if "intensity" in data_dict.keys():
+            data_dict["intensity"] = data_dict["intensity"].astype(np.float32) / self.max_value
+        return data_dict
+
+
+# Intensity 随机缩放
+class RandomIntensityScale(object):
+    def __init__(self, scale=(0.8, 1.2), p=0.95):
+        """
+        Randomly scale intensity values.
+        
+        Args:
+            scale: (min_scale, max_scale) tuple
+            p: Probability of applying the transform
+        """
+        self.scale = scale
+        self.p = p
+
+    def __call__(self, data_dict):
+        if "intensity" in data_dict.keys() and np.random.rand() < self.p:
+            scale_factor = np.random.uniform(self.scale[0], self.scale[1])
+            data_dict["intensity"] = np.clip(
+                data_dict["intensity"] * scale_factor, 0, 1
+            ).astype(data_dict["intensity"].dtype)
+        return data_dict
+
+
+# Intensity 随机偏移
+class RandomIntensityShift(object):
+    def __init__(self, shift=(-0.1, 0.1), p=0.95):
+        """
+        Randomly shift intensity values.
+        
+        Args:
+            shift: (min_shift, max_shift) tuple for additive shift
+            p: Probability of applying the transform
+        """
+        self.shift = shift
+        self.p = p
+
+    def __call__(self, data_dict):
+        if "intensity" in data_dict.keys() and np.random.rand() < self.p:
+            shift_value = np.random.uniform(self.shift[0], self.shift[1])
+            if data_dict["intensity"].dtype in [np.float32, np.float64]:
+                # Normalized intensity [0, 1]
+                data_dict["intensity"] = np.clip(
+                    data_dict["intensity"] + shift_value, 0, 1
+                )
+            else:
+                # Raw intensity (e.g., uint16)
+                max_val = np.iinfo(data_dict["intensity"].dtype).max
+                shift_value_scaled = shift_value * max_val
+                data_dict["intensity"] = np.clip(
+                    data_dict["intensity"] + shift_value_scaled, 0, max_val
+                ).astype(data_dict["intensity"].dtype)
+        return data_dict
+
+
+# Intensity 随机噪声
+class RandomIntensityNoise(object):
+    def __init__(self, sigma=0.01, p=0.5):
+        """
+        Add random Gaussian noise to intensity.
+        
+        Args:
+            sigma: Standard deviation of Gaussian noise (for normalized intensity)
+            p: Probability of applying the transform
+        """
+        self.sigma = sigma
+        self.p = p
+
+    def __call__(self, data_dict):
+        if "intensity" in data_dict.keys() and np.random.rand() < self.p:
+            noise = np.random.normal(0, self.sigma, data_dict["intensity"].shape)
+            if data_dict["intensity"].dtype in [np.float32, np.float64]:
+                # Normalized intensity
+                data_dict["intensity"] = np.clip(
+                    data_dict["intensity"] + noise, 0, 1
+                ).astype(data_dict["intensity"].dtype)
+            else:
+                # Raw intensity
+                max_val = np.iinfo(data_dict["intensity"].dtype).max
+                noise_scaled = noise * max_val
+                data_dict["intensity"] = np.clip(
+                    data_dict["intensity"] + noise_scaled, 0, max_val
+                ).astype(data_dict["intensity"].dtype)
+        return data_dict
+
+
+# Intensity 随机丢弃（置为0）
+class RandomIntensityDrop(object):
+    def __init__(self, drop_ratio=0.1, p=0.2):
+        """
+        Randomly drop (set to 0) a portion of intensity values.
+        
+        Args:
+            drop_ratio: Ratio of points whose intensity will be set to 0
+            p: Probability of applying the transform
+        """
+        self.drop_ratio = drop_ratio
+        self.p = p
+
+    def __call__(self, data_dict):
+        if "intensity" in data_dict.keys() and np.random.rand() < self.p:
+            n = len(data_dict["intensity"])
+            drop_mask = np.random.rand(n) < self.drop_ratio
+            data_dict["intensity"][drop_mask] = 0
+        return data_dict
+
+
+# Intensity 对比度增强
+class IntensityAutoContrast(object):
+    def __init__(self, p=0.2, blend_factor=None):
+        """
+        Auto contrast for intensity (similar to ChromaticAutoContrast).
+        
+        Args:
+            p: Probability of applying the transform
+            blend_factor: Blend factor between original and contrasted intensity.
+                         If None, randomly sampled.
+        """
+        self.p = p
+        self.blend_factor = blend_factor
+
+    def __call__(self, data_dict):
+        if "intensity" in data_dict.keys() and np.random.rand() < self.p:
+            intensity = data_dict["intensity"].astype(np.float32)
+            lo = np.min(intensity)
+            hi = np.max(intensity)
+            
+            if hi > lo:  # Avoid division by zero
+                if intensity.dtype in [np.float32, np.float64]:
+                    # Normalized intensity
+                    scale = 1.0 / (hi - lo)
+                    contrast_intensity = (intensity - lo) * scale
+                else:
+                    # Raw intensity
+                    max_val = np.iinfo(data_dict["intensity"].dtype).max
+                    scale = max_val / (hi - lo)
+                    contrast_intensity = (intensity - lo) * scale
+                
+                blend_factor = (
+                    np.random.rand() if self.blend_factor is None else self.blend_factor
+                )
+                data_dict["intensity"] = (
+                    (1 - blend_factor) * intensity + blend_factor * contrast_intensity
+                ).astype(data_dict["intensity"].dtype)
+        return data_dict
+
+
+# Intensity Gamma 变换
+class RandomIntensityGamma(object):
+    def __init__(self, gamma_range=(0.8, 1.2), p=0.5):
+        """
+        Apply random gamma correction to intensity.
+        
+        Args:
+            gamma_range: (min_gamma, max_gamma) range for gamma values
+            p: Probability of applying the transform
+        """
+        self.gamma_range = gamma_range
+        self.p = p
+
+    def __call__(self, data_dict):
+        if "intensity" in data_dict.keys() and np.random.rand() < self.p:
+            gamma = np.random.uniform(self.gamma_range[0], self.gamma_range[1])
+            
+            if data_dict["intensity"].dtype in [np.float32, np.float64]:
+                # Normalized intensity [0, 1]
+                data_dict["intensity"] = np.power(
+                    data_dict["intensity"], gamma
+                ).astype(data_dict["intensity"].dtype)
+            else:
+                # Raw intensity - normalize first, apply gamma, then denormalize
+                max_val = np.iinfo(data_dict["intensity"].dtype).max
+                normalized = data_dict["intensity"].astype(np.float32) / max_val
+                gamma_corrected = np.power(normalized, gamma)
+                data_dict["intensity"] = (gamma_corrected * max_val).astype(
+                    data_dict["intensity"].dtype
+                )
+        return data_dict
+
+
+# Intensity 标准化（减均值除方差）
+class StandardNormalizeIntensity(object):
+    def __init__(self, mean=None, std=None):
+        """
+        Standardize intensity by subtracting mean and dividing by std.
+        
+        Args:
+            mean: Mean value for normalization. If None, computed from data.
+            std: Std value for normalization. If None, computed from data.
+        """
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, data_dict):
+        if "intensity" in data_dict.keys():
+            intensity = data_dict["intensity"].astype(np.float32)
+            
+            # Compute mean and std if not provided
+            mean = self.mean if self.mean is not None else intensity.mean()
+            std = self.std if self.std is not None else intensity.std()
+            
+            # Avoid division by zero
+            if std == 0:
+                std = 1.0
+            
+            data_dict["intensity"] = ((intensity - mean) / std).astype(np.float32)
+        return data_dict
+
+
+# Intensity MinMax 归一化
+class MinMaxNormalizeIntensity(object):
+    def __init__(self, min_val=None, max_val=None, target_range=(0, 1)):
+        """
+        MinMax normalize intensity to target range.
+        
+        Args:
+            min_val: Minimum value for normalization. If None, computed from data.
+            max_val: Maximum value for normalization. If None, computed from data.
+            target_range: Target range (min, max) for normalized values.
+        """
+        self.min_val = min_val
+        self.max_val = max_val
+        self.target_range = target_range
+
+    def __call__(self, data_dict):
+        if "intensity" in data_dict.keys():
+            intensity = data_dict["intensity"].astype(np.float32)
+            
+            # Compute min and max if not provided
+            min_val = self.min_val if self.min_val is not None else intensity.min()
+            max_val = self.max_val if self.max_val is not None else intensity.max()
+            
+            # Avoid division by zero
+            if max_val == min_val:
+                data_dict["intensity"] = np.full_like(
+                    intensity, 
+                    (self.target_range[0] + self.target_range[1]) / 2,
+                    dtype=np.float32
+                )
+            else:
+                # Normalize to [0, 1] first
+                normalized = (intensity - min_val) / (max_val - min_val)
+                # Scale to target range
+                target_min, target_max = self.target_range
+                data_dict["intensity"] = (
+                    normalized * (target_max - target_min) + target_min
+                ).astype(np.float32)
+        return data_dict
+
     
 # ———— 颜色变换 ————
 # 颜色对比度增强

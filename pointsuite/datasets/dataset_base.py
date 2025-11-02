@@ -37,6 +37,7 @@ class DatasetBase(Dataset, ABC):
             ignore_label: int = -1,
             loop: int = 1,
             cache_data: bool = False,
+            class_mapping: Optional[Dict[int, int]] = None,
             **kwargs
     ):
         """
@@ -50,6 +51,9 @@ class DatasetBase(Dataset, ABC):
             ignore_label: Label to ignore in training/evaluation
             loop: Number of times to loop through dataset (for training augmentation)
             cache_data: Whether to cache loaded data in memory
+            class_mapping: Dict mapping original class labels to continuous labels.
+                          Example: {0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
+                          If None, no mapping is applied.
             **kwargs: Additional arguments for subclasses
         """
         super().__init__()
@@ -68,6 +72,7 @@ class DatasetBase(Dataset, ABC):
         self.ignore_label = ignore_label
         self.loop = (loop if split == 'train' else 1)
         self.cache_data = cache_data
+        self.class_mapping = class_mapping
         
         # Cache for data if enabled
         self.data_cache = {} if cache_data else None

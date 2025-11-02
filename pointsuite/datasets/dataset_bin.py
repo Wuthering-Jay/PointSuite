@@ -38,6 +38,7 @@ class BinPklDataset(DatasetBase):
         ignore_label=-1,
         loop=1,
         cache_data=False,
+        class_mapping=None,
     ):
         """
         Initialize BinPklDataset.
@@ -57,10 +58,19 @@ class BinPklDataset(DatasetBase):
                                  Suitable for small datasets that fit in RAM.
                        - If False: Data is loaded from disk each time (using memmap for efficiency).
                                   Suitable for large datasets.
+            class_mapping: Dict mapping original class labels to continuous labels.
+                          Example: {0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
+                          If None, no mapping is applied.
         """
         # Set default assets if not specified
         if assets is None:
             assets = ['coord', 'intensity', 'classification']
+        
+        # Store class mapping
+        self.class_mapping = class_mapping
+        
+        # Initialize metadata cache (significantly speeds up data loading)
+        self._metadata_cache = {}
         
         # Call parent init
         super().__init__(
@@ -158,10 +168,15 @@ class BinPklDataset(DatasetBase):
         bin_path = Path(sample_info['bin_path'])
         segment_id = sample_info['segment_id']
         
-        # Load pkl metadata to get segment info
+        # Load pkl metadata (with caching to avoid repeated disk I/O)
         pkl_path = Path(sample_info['pkl_path'])
-        with open(pkl_path, 'rb') as f:
-            metadata = pickle.load(f)
+        pkl_key = str(pkl_path)
+        
+        if pkl_key not in self._metadata_cache:
+            with open(pkl_path, 'rb') as f:
+                self._metadata_cache[pkl_key] = pickle.load(f)
+        
+        metadata = self._metadata_cache[pkl_key]
         
         # Find the segment info
         segment_info = None
@@ -224,7 +239,16 @@ class BinPklDataset(DatasetBase):
             elif asset == 'classification':
                 # Store separately as target, not in feature
                 classification = segment_points['classification'].astype(np.int64)
-                data['classification'] = classification
+                
+                # Apply class mapping if provided
+                if self.class_mapping is not None:
+                    # Create a copy to avoid modifying original data
+                    mapped_classification = classification.copy()
+                    for original_label, new_label in self.class_mapping.items():
+                        mapped_classification[classification == original_label] = new_label
+                    data['classification'] = mapped_classification
+                else:
+                    data['classification'] = classification
                 
             elif asset == 'return_number' and 'return_number' in segment_points.dtype.names:
                 return_num = segment_points['return_number'].astype(np.float32)[:, np.newaxis]
