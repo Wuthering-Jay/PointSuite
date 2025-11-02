@@ -19,7 +19,7 @@ import numpy as np
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from pointsuite.datasets.dataset_bin import BinPklDataset
+from pointsuite.data.datasets.dataset_bin import BinPklDataset
 
 
 def test_basic_loading(data_root):

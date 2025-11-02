@@ -426,7 +426,7 @@ class ShufflePoint(object):
         return data_dict
 
 
-# ———— Intensity 变换 ————
+# ———— 强度变换 ————
 # Intensity 归一化
 class NormalizeIntensity(object):
     def __init__(self, max_value=65535.0):
@@ -546,46 +546,6 @@ class RandomIntensityDrop(object):
             n = len(data_dict["intensity"])
             drop_mask = np.random.rand(n) < self.drop_ratio
             data_dict["intensity"][drop_mask] = 0
-        return data_dict
-
-
-# Intensity 对比度增强
-class IntensityAutoContrast(object):
-    def __init__(self, p=0.2, blend_factor=None):
-        """
-        Auto contrast for intensity (similar to ChromaticAutoContrast).
-        
-        Args:
-            p: Probability of applying the transform
-            blend_factor: Blend factor between original and contrasted intensity.
-                         If None, randomly sampled.
-        """
-        self.p = p
-        self.blend_factor = blend_factor
-
-    def __call__(self, data_dict):
-        if "intensity" in data_dict.keys() and np.random.rand() < self.p:
-            intensity = data_dict["intensity"].astype(np.float32)
-            lo = np.min(intensity)
-            hi = np.max(intensity)
-            
-            if hi > lo:  # Avoid division by zero
-                if intensity.dtype in [np.float32, np.float64]:
-                    # Normalized intensity
-                    scale = 1.0 / (hi - lo)
-                    contrast_intensity = (intensity - lo) * scale
-                else:
-                    # Raw intensity
-                    max_val = np.iinfo(data_dict["intensity"].dtype).max
-                    scale = max_val / (hi - lo)
-                    contrast_intensity = (intensity - lo) * scale
-                
-                blend_factor = (
-                    np.random.rand() if self.blend_factor is None else self.blend_factor
-                )
-                data_dict["intensity"] = (
-                    (1 - blend_factor) * intensity + blend_factor * contrast_intensity
-                ).astype(data_dict["intensity"].dtype)
         return data_dict
 
 

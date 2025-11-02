@@ -21,9 +21,9 @@ from torch.utils.data import DataLoader
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from pointsuite.datasets.dataset_bin import BinPklDataset
-from pointsuite.datasets import transforms as T
-from pointsuite.datasets.collate import (
+from pointsuite.data.datasets.dataset_bin import BinPklDataset
+from pointsuite.data import transforms as T
+from pointsuite.data.datasets.collate import (
     collate_fn,
     DynamicBatchSampler,
     create_limited_dataloader

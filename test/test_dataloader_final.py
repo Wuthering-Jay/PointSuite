@@ -24,8 +24,8 @@ from torch.utils.data import DataLoader
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from pointsuite.datasets.dataset_bin import BinPklDataset
-from pointsuite.datasets import transforms as T
+from pointsuite.data.datasets.dataset_bin import BinPklDataset
+from pointsuite.data import transforms as T
 
 
 def collate_fn(batch):

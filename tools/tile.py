@@ -933,8 +933,8 @@ def load_all_segments_info(pkl_path: Union[str, Path]) -> List[Dict[str, Any]]:
 
 if __name__ == "__main__":
     # 示例：处理LAS文件（带Grid Sampling）
-    input_path = r"E:\data\DALES\dales_las\train"
-    output_dir = r"E:\data\DALES\dales_las\bin\train"
+    input_path = r"E:\data\Dales\dales_las\train"
+    output_dir = r"E:\data\Dales\dales_las\bin\train"
     window_size = (50.0, 50.0)
     min_points = 4096 * 5
     max_points = 4096 * 20

@@ -21,7 +21,7 @@ from collections import Counter
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from pointsuite.datasets.dataset_bin import BinPklDataset
+from pointsuite.data.datasets.dataset_bin import BinPklDataset
 
 
 def test_init_speed():
@@ -206,7 +206,7 @@ def test_batch_sampler_speed():
         print(f"[X] 数据目录不存在: {data_root}")
         return
     
-    from pointsuite.datasets.collate import DynamicBatchSampler
+    from pointsuite.data.datasets.collate import DynamicBatchSampler
     
     dataset = BinPklDataset(
         data_root=data_root,
