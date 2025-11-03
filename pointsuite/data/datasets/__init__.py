@@ -1,7 +1,7 @@
 """
-PointSuite Datasets Module
+PointSuite 数据集模块
 
-Provides dataset classes for loading various point cloud data formats.
+提供用于加载各种点云数据格式的数据集类
 """
 
 from .dataset_base import DatasetBase

@@ -32,8 +32,8 @@ class Compose:
 
 # 索引操作
 def index_operator(data_dict, index, duplicate=False):
-    # index selection operator for keys in "index_valid_keys"
-    # custom these keys by "Update" transform in config
+    # 对 "index_valid_keys" 中的键执行索引选择操作
+    # 可在配置中通过 "Update" 变换自定义这些键
     # 对 data_dict 中的键进行索引操作
     if "index_valid_keys" not in data_dict:
         data_dict["index_valid_keys"] = [
@@ -91,7 +91,7 @@ class Collect(object):
                 if tensor.dim() == 1:  # 如果是 [n]，扩展成 [n, 1]
                     tensor = tensor.unsqueeze(1)
                 tensors.append(tensor)
-            data[name] = torch.cat(tensors, dim=1)  # [n, c + m]（m 是额外拼接的 1D Tensor 数量）
+            data[name] = torch.cat(tensors, dim=1)  # [n, c + m]（m 是额外拼接的 1D 张量数量）
         return data
     
 

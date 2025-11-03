@@ -7,25 +7,25 @@ from abc import ABC, abstractmethod
 
 from torch.utils.data import Dataset
 from collections.abc import Sequence
-from .transforms import Compose
+from ..transforms import Compose
 
 
 class DatasetBase(Dataset, ABC):
     """
-    Abstract base dataset class for point cloud data.
+    点云数据的抽象基础数据集类
     
-    This serves as the foundation for all dataset implementations.
-    Subclasses should implement the abstract methods to handle specific data formats.
+    这是所有数据集实现的基础
+    子类应实现抽象方法来处理特定的数据格式
     """
 
     VALID_ASSETS = [
-        "coord",  # XYZ coordinates (required)
-        "color",  # RGB color
-        "normal",  # Normal vectors
-        "intensity",  # Intensity
-        "return_number",  # Return number
-        "number_of_returns",  # Number of returns
-        "classification",  # Classification labels
+        "coord",  # XYZ 坐标（必需）
+        "color",  # RGB 颜色
+        "normal",  # 法向量
+        "intensity",  # 强度
+        "return_number",  # 回波编号
+        "number_of_returns",  # 回波总数
+        "classification",  # 分类标签
     ]
 
     def __init__(
@@ -41,29 +41,29 @@ class DatasetBase(Dataset, ABC):
             **kwargs
     ):
         """
-        Initialize base dataset.
+        初始化基础数据集
         
-        Args:
-            data_root: Root directory, single file path, or list of file paths
-            split: Dataset split ('train', 'val', 'test')
-            assets: List of data attributes to load (None for default)
-            transform: Data transforms to apply
-            ignore_label: Label to ignore in training/evaluation
-            loop: Number of times to loop through dataset (for training augmentation)
-            cache_data: Whether to cache loaded data in memory
-            class_mapping: Dict mapping original class labels to continuous labels.
-                          Example: {0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
-                          If None, no mapping is applied.
-            **kwargs: Additional arguments for subclasses
+        参数：
+            data_root: 根目录、单个文件路径或文件路径列表
+            split: 数据集划分（'train'、'val'、'test'）
+            assets: 要加载的数据属性列表（None 表示使用默认值）
+            transform: 要应用的数据变换
+            ignore_label: 在训练/评估中忽略的标签
+            loop: 遍历数据集的次数（用于训练增强）
+            cache_data: 是否在内存中缓存加载的数据
+            class_mapping: 将原始类别标签映射到连续标签的字典
+                          示例：{0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
+                          如果为 None，则不应用映射
+            **kwargs: 子类的其他参数
         """
         super().__init__()
         
-        # Handle different data_root types
+        # 处理不同的 data_root 类型
         if isinstance(data_root, (list, tuple)):
-            # List of paths
+            # 路径列表
             self.data_root = data_root
         else:
-            # Single path
+            # 单个路径
             self.data_root = Path(data_root)
         
         self.split = split
@@ -74,82 +74,82 @@ class DatasetBase(Dataset, ABC):
         self.cache_data = cache_data
         self.class_mapping = class_mapping
         
-        # Cache for data if enabled
+        # 如果启用则缓存数据
         self.data_cache = {} if cache_data else None
         
-        # Validate data root (skip validation for list type, subclass will handle)
+        # 验证数据根目录（对于列表类型跳过验证，由子类处理）
         if not isinstance(self.data_root, (list, tuple)) and not self.data_root.exists():
-            raise ValueError(f"Data root does not exist: {self.data_root}")
+            raise ValueError(f"数据根目录不存在: {self.data_root}")
         
-        # Load data list (implemented by subclass)
+        # 加载数据列表（由子类实现）
         self.data_list = self._load_data_list()
         
-        # Print initialization info
+        # 打印初始化信息
         self._print_init_info()
     
     def _print_init_info(self):
-        """Print dataset initialization information."""
-        print(f"==> {self.__class__.__name__} ({self.split}) initialized:")
-        print(f"    - Data root: {self.data_root}")
-        print(f"    - Total samples: {len(self.data_list)}")
-        print(f"    - Assets: {self.assets}")
-        print(f"    - Loop: {self.loop}")
-        print(f"    - Cache: {'Enabled' if self.cache_data else 'Disabled'}")
+        """打印数据集初始化信息"""
+        print(f"==> {self.__class__.__name__} ({self.split}) 已初始化:")
+        print(f"    - 数据根目录: {self.data_root}")
+        print(f"    - 总样本数: {len(self.data_list)}")
+        print(f"    - 资产: {self.assets}")
+        print(f"    - 循环: {self.loop}")
+        print(f"    - 缓存: {'已启用' if self.cache_data else '已禁用'}")
     
     @abstractmethod
     def _load_data_list(self) -> List[Dict[str, Any]]:
         """
-        Load list of all data samples.
-        Must be implemented by subclass.
+        加载所有数据样本的列表
+        必须由子类实现
         
-        Returns:
-            List of dicts containing sample information
+        返回：
+            包含样本信息的字典列表
         """
-        raise NotImplementedError("Subclass must implement _load_data_list()")
+        raise NotImplementedError("子类必须实现 _load_data_list() 方法")
     
     @abstractmethod
     def _load_data(self, idx: int) -> Dict[str, Any]:
         """
-        Load point cloud data for a given index.
-        Must be implemented by subclass.
+        加载给定索引的点云数据
+        必须由子类实现
         
-        Args:
-            idx: Data index
+        参数：
+            idx: 数据索引
             
-        Returns:
-            Dict containing loaded data (coord, labels, etc.)
+        返回：
+            包含加载数据的字典（coord、labels 等）
         """
-        raise NotImplementedError("Subclass must implement _load_data()")
+        raise NotImplementedError("子类必须实现 _load_data() 方法")
     
     def __len__(self) -> int:
-        """Return dataset length considering loop factor."""
+        """返回考虑循环因子的数据集长度"""
         return len(self.data_list) * self.loop
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         """
-        Load and return a data sample.
+        加载并返回一个数据样本
         
-        Args:
-            idx: Sample index
+        参数：
+            idx: 样本索引
             
-        Returns:
-            Dict containing point cloud data and labels
+        返回：
+            包含点云数据和标签的字典
         """
-        # Handle loop
+        # 处理循环
         data_idx = idx % len(self.data_list)
         
-        # Check cache
+        # 检查缓存
         if self.cache_data and data_idx in self.data_cache:
             data_dict = self.data_cache[data_idx].copy()
         else:
-            # Load data (implemented by subclass)
+            # 加载数据（由子类实现）
             data_dict = self._load_data(data_idx)
             
-            # Cache if enabled
+            # 如果启用则缓存
             if self.cache_data:
                 self.data_cache[data_idx] = data_dict.copy()
         
-        # Apply transforms
+        # 应用变换
         if self.transform is not None:
             data_dict = self.transform(data_dict)
         
@@ -157,13 +157,13 @@ class DatasetBase(Dataset, ABC):
     
     def get_sample_info(self, idx: int) -> Dict[str, Any]:
         """
-        Get sample information without loading data.
+        获取样本信息而不加载数据
         
-        Args:
-            idx: Sample index
+        参数：
+            idx: 样本索引
             
-        Returns:
-            Sample info dict
+        返回：
+            样本信息字典
         """
         data_idx = idx % len(self.data_list)
         return self.data_list[data_idx]

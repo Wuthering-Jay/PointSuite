@@ -1,8 +1,8 @@
 """
-Base DataModule for Point Cloud Data
+点云数据的基础 DataModule
 
-This module provides an abstract base class for PyTorch Lightning DataModules
-that can be extended for different dataset formats.
+本模块提供了一个抽象基类，用于 PyTorch Lightning DataModule，
+可以扩展以支持不同的数据集格式。
 """
 
 import pytorch_lightning as pl
@@ -16,18 +16,18 @@ from .datasets.collate import collate_fn, DynamicBatchSampler
 
 class DataModuleBase(pl.LightningDataModule, ABC):
     """
-    Abstract base class for point cloud data modules.
+    点云数据模块的抽象基类
     
-    This class provides common functionality for data loading, including:
-    - Setup of train/val/test datasets
-    - Creation of DataLoaders with DynamicBatchSampler support
-    - Support for WeightedRandomSampler for handling class imbalance
-    - Memory-efficient data loading with configurable workers
+    本类提供数据加载的通用功能，包括：
+    - 设置训练/验证/测试数据集
+    - 创建支持 DynamicBatchSampler 的 DataLoader
+    - 支持 WeightedRandomSampler 以处理类别不平衡
+    - 配置可调节的工作进程以实现内存高效的数据加载
     
-    Subclasses must implement:
-    - _create_dataset(): Create dataset instances for each split
+    子类必须实现：
+    - _create_dataset(): 为每个数据集划分创建数据集实例
     
-    Example:
+    示例：
         >>> class MyDataModule(DataModuleBase):
         ...     def _create_dataset(self, data_paths, split, transforms):
         ...         return MyDataset(data_paths, split=split, transform=transforms)
@@ -59,35 +59,35 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         **kwargs
     ):
         """
-        Initialize DataModuleBase.
+        初始化 DataModuleBase
         
-        Args:
-            data_root: Root directory containing the data files
-            train_files: List of training file names. If None, auto-discover from data_root
-            val_files: List of validation file names. If None, auto-discover from data_root
-            test_files: List of test file names. If None, auto-discover from data_root
-            batch_size: Batch size for DataLoader (not used when use_dynamic_batch=True)
-            num_workers: Number of workers for data loading
-            train_transforms: List of transforms for training data
-            val_transforms: List of transforms for validation data
-            test_transforms: List of transforms for test data
-            use_dynamic_batch: Whether to use DynamicBatchSampler (recommended for memory control)
-                              If True, batch_size parameter is ignored
-            max_points: Maximum points per batch (only used with use_dynamic_batch=True)
-            train_sampler_weights: Optional weights for WeightedRandomSampler (training only)
-                                  If provided, will create a WeightedRandomSampler for training
-                                  Can be used with use_dynamic_batch=True
-            pin_memory: Whether to use pinned memory in DataLoader (faster GPU transfer)
-            persistent_workers: Keep workers alive between epochs (faster but uses more memory)
-            prefetch_factor: Number of batches to prefetch per worker
-            **kwargs: Additional arguments passed to subclass and dataset
+        参数：
+            data_root: 包含数据文件的根目录
+            train_files: 训练文件名列表。如果为 None，则从 data_root 自动发现
+            val_files: 验证文件名列表。如果为 None，则从 data_root 自动发现
+            test_files: 测试文件名列表。如果为 None，则从 data_root 自动发现
+            batch_size: DataLoader 的批次大小（当 use_dynamic_batch=True 时不使用）
+            num_workers: 数据加载的工作进程数
+            train_transforms: 训练数据的变换列表
+            val_transforms: 验证数据的变换列表
+            test_transforms: 测试数据的变换列表
+            use_dynamic_batch: 是否使用 DynamicBatchSampler（推荐用于内存控制）
+                              如果为 True，batch_size 参数将被忽略
+            max_points: 每个批次的最大点数（仅在 use_dynamic_batch=True 时使用）
+            train_sampler_weights: WeightedRandomSampler 的可选权重（仅用于训练）
+                                  如果提供，将为训练创建 WeightedRandomSampler
+                                  可与 use_dynamic_batch=True 一起使用
+            pin_memory: 是否在 DataLoader 中使用固定内存（更快的 GPU 传输）
+            persistent_workers: 在 epoch 之间保持工作进程活动（更快但使用更多内存）
+            prefetch_factor: 每个工作进程预取的批次数
+            **kwargs: 传递给子类和数据集的其他参数
         """
         super().__init__()
         
-        # Save hyperparameters (excluding transforms and weights to avoid serialization issues)
+        # 保存超参数（排除 transforms 和 weights 以避免序列化问题）
         self.save_hyperparameters(ignore=['train_transforms', 'val_transforms', 'test_transforms', 'train_sampler_weights'])
         
-        # Store core parameters
+        # 存储核心参数
         self.data_root = Path(data_root)
         self.train_files = train_files
         self.val_files = val_files
@@ -95,81 +95,80 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         self.batch_size = batch_size
         self.num_workers = num_workers
         
-        # Store transforms
+        # 存储数据变换
         self.train_transforms = train_transforms
         self.val_transforms = val_transforms
         self.test_transforms = test_transforms
         
-        # Store sampling parameters
+        # 存储采样参数
         self.use_dynamic_batch = use_dynamic_batch
         self.max_points = max_points
         self.train_sampler_weights = train_sampler_weights
         
-        # Store DataLoader parameters
+        # 存储 DataLoader 参数
         self.pin_memory = pin_memory
         self.persistent_workers = persistent_workers
         self.prefetch_factor = prefetch_factor
         
-        # Store additional kwargs for subclasses
+        # 存储子类的额外参数
         self.kwargs = kwargs
         
-        # Collate function (always use basic collate_fn with DynamicBatchSampler)
+        # 合并函数（始终使用基本的 collate_fn 配合 DynamicBatchSampler）
         self.collate_fn = collate_fn
         
-        # Dataset placeholders
+        # 数据集占位符
         self.train_dataset = None
         self.val_dataset = None
         self.test_dataset = None
         
-        # Validation
+        # 验证
         if not self.data_root.exists():
-            raise ValueError(f"Data root does not exist: {self.data_root}")
+            raise ValueError(f"数据根目录不存在: {self.data_root}")
     
     @abstractmethod
     def _create_dataset(self, data_paths, split: str, transforms):
         """
-        Create a dataset instance for the given split.
+        为给定的数据集划分创建数据集实例
         
-        This method must be implemented by subclasses to create
-        the appropriate dataset type.
+        子类必须实现此方法以创建适当的数据集类型
         
-        Args:
-            data_paths: Path(s) to the data files (can be Path, list of Paths, or list of strings)
-            split: Dataset split ('train', 'val', 'test')
-            transforms: List of transforms to apply
+        参数：
+            data_paths: 数据文件的路径（可以是 Path、Path 列表或字符串列表）
+            split: 数据集划分（'train'、'val'、'test'）
+            transforms: 要应用的变换列表
             
-        Returns:
-            Dataset instance
+        返回：
+            数据集实例
         """
-        raise NotImplementedError("Subclass must implement _create_dataset()")
+        raise NotImplementedError("子类必须实现 _create_dataset() 方法")
     
     def prepare_data(self):
         """
-        Download, tokenize, etc. (single process on 1 GPU/TPU).
+        下载、分词等数据准备工作（在 1 个 GPU/TPU 上的单进程中执行）
         
-        This is called only on 1 GPU in distributed training.
-        Use this for data preparation steps that should only be done once.
+        在分布式训练中，此方法仅在 1 个 GPU 上调用
+        用于只需执行一次的数据准备步骤
         """
-        # In most cases, we assume data is already prepared
-        # Subclasses can override this method if needed
+        # 在大多数情况下，我们假设数据已经准备好了
+        # 如果需要，子类可以覆盖此方法
         pass
     
     def setup(self, stage: Optional[str] = None):
         """
-        Setup datasets for each stage (fit, validate, test, predict).
+        为每个阶段设置数据集（fit、validate、test、predict）
         
-        This is called on every GPU in distributed training.
+        在分布式训练中，此方法在每个 GPU 上调用
         
-        Args:
-            stage: Current stage ('fit', 'validate', 'test', 'predict', or None for all)
+        参数：
+            stage: 当前阶段（'fit'、'validate'、'test'、'predict'，或 None 表示所有阶段）
         """
-        # Setup training dataset
+        # 设置训练数据集
         if stage == 'fit' or stage is None:
             if self.train_files is not None:
-                # Use specified files
+                # 使用指定的文件
                 train_paths = [self.data_root / f for f in self.train_files]
             else:
-                # Auto-discover train files
+                # 自动发现训练文件
                 train_paths = self.data_root
             
             self.train_dataset = self._create_dataset(
@@ -178,13 +177,13 @@ class DataModuleBase(pl.LightningDataModule, ABC):
                 transforms=self.train_transforms
             )
         
-        # Setup validation dataset
+        # 设置验证数据集
         if stage == 'fit' or stage == 'validate' or stage is None:
             if self.val_files is not None:
-                # Use specified files
+                # 使用指定的文件
                 val_paths = [self.data_root / f for f in self.val_files]
             else:
-                # Auto-discover val files
+                # 自动发现验证文件
                 val_paths = self.data_root
             
             self.val_dataset = self._create_dataset(
@@ -193,13 +192,13 @@ class DataModuleBase(pl.LightningDataModule, ABC):
                 transforms=self.val_transforms
             )
         
-        # Setup test dataset
+        # 设置测试数据集
         if stage == 'test' or stage == 'predict' or stage is None:
             if self.test_files is not None:
-                # Use specified files
+                # 使用指定的文件
                 test_paths = [self.data_root / f for f in self.test_files]
             else:
-                # Auto-discover test files
+                # 自动发现测试文件
                 test_paths = self.data_root
             
             self.test_dataset = self._create_dataset(
@@ -216,32 +215,32 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         use_sampler_weights: bool = False
     ) -> DataLoader:
         """
-        Create a DataLoader with appropriate settings.
+        创建具有适当设置的 DataLoader
         
-        Args:
-            dataset: Dataset instance
-            shuffle: Whether to shuffle data (ignored if using batch_sampler)
-            drop_last: Whether to drop last incomplete batch
-            use_sampler_weights: Whether to use weighted sampling (only for training)
+        参数：
+            dataset: 数据集实例
+            shuffle: 是否打乱数据（如果使用 batch_sampler 则忽略）
+            drop_last: 是否丢弃最后一个不完整的批次
+            use_sampler_weights: 是否使用加权采样（仅用于训练）
             
-        Returns:
-            DataLoader instance
+        返回：
+            DataLoader 实例
         """
         if self.use_dynamic_batch:
-            # Create base sampler if weights are provided and requested
+            # 如果提供了权重并且被请求，则创建基础采样器
             base_sampler = None
             if use_sampler_weights and self.train_sampler_weights is not None:
                 base_sampler = WeightedRandomSampler(
                     weights=self.train_sampler_weights,
                     num_samples=len(dataset),
-                    replacement=True  # Use replacement to support oversampling
+                    replacement=True  # 使用有放回采样以支持过采样
                 )
             
-            # Create DynamicBatchSampler
+            # 创建 DynamicBatchSampler
             batch_sampler = DynamicBatchSampler(
                 dataset=dataset,
                 max_points=self.max_points,
-                shuffle=(shuffle and base_sampler is None),  # Only shuffle if no base_sampler
+                shuffle=(shuffle and base_sampler is None),  # 仅在没有 base_sampler 时打乱
                 drop_last=drop_last,
                 sampler=base_sampler
             )
@@ -256,7 +255,7 @@ class DataModuleBase(pl.LightningDataModule, ABC):
                 prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             )
         else:
-            # Use standard fixed batch_size
+            # 使用标准的固定 batch_size
             return DataLoader(
                 dataset,
                 batch_size=self.batch_size,
@@ -270,44 +269,44 @@ class DataModuleBase(pl.LightningDataModule, ABC):
             )
     
     def train_dataloader(self) -> DataLoader:
-        """Create and return the training DataLoader."""
+        """创建并返回训练 DataLoader"""
         return self._create_dataloader(
             dataset=self.train_dataset,
             shuffle=True,
             drop_last=True,
-            use_sampler_weights=True  # Enable weighted sampling for training
+            use_sampler_weights=True  # 为训练启用加权采样
         )
     
     def val_dataloader(self) -> DataLoader:
-        """Create and return the validation DataLoader."""
+        """创建并返回验证 DataLoader"""
         return self._create_dataloader(
             dataset=self.val_dataset,
             shuffle=False,
             drop_last=False,
-            use_sampler_weights=False  # No weighted sampling for validation
+            use_sampler_weights=False  # 验证不使用加权采样
         )
     
     def test_dataloader(self) -> DataLoader:
-        """Create and return the test DataLoader."""
+        """创建并返回测试 DataLoader"""
         return self._create_dataloader(
             dataset=self.test_dataset,
             shuffle=False,
             drop_last=False,
-            use_sampler_weights=False  # No weighted sampling for test
+            use_sampler_weights=False  # 测试不使用加权采样
         )
     
     def predict_dataloader(self) -> DataLoader:
-        """Create and return the prediction DataLoader (same as test)."""
+        """创建并返回预测 DataLoader（与测试相同）"""
         return self.test_dataloader()
     
     def teardown(self, stage: Optional[str] = None):
         """
-        Clean up after training/testing.
+        训练/测试后清理资源
         
-        Args:
-            stage: Current stage ('fit', 'validate', 'test', 'predict')
+        参数：
+            stage: 当前阶段（'fit'、'validate'、'test'、'predict'）
         """
-        # Clean up datasets to free memory
+        # 清理数据集以释放内存
         if stage == 'fit':
             self.train_dataset = None
             self.val_dataset = None
@@ -316,25 +315,25 @@ class DataModuleBase(pl.LightningDataModule, ABC):
     
     def on_exception(self, exception: BaseException):
         """
-        Called when an exception is raised during training/testing.
+        在训练/测试期间引发异常时调用
         
-        Args:
-            exception: The exception that was raised
+        参数：
+            exception: 引发的异常
         """
-        # Clean up resources
+        # 清理资源
         self.teardown()
     
-    # Utility methods
+    # 工具方法
     
     def get_dataset_info(self, split: str = 'train') -> Dict[str, Any]:
         """
-        Get information about a dataset split.
+        获取数据集划分的信息
         
-        Args:
-            split: Dataset split ('train', 'val', 'test')
+        参数：
+            split: 数据集划分（'train'、'val'、'test'）
             
-        Returns:
-            Dict containing dataset information
+        返回：
+            包含数据集信息的字典
         """
         if split == 'train' and self.train_dataset is not None:
             dataset = self.train_dataset
@@ -343,15 +342,15 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         elif split == 'test' and self.test_dataset is not None:
             dataset = self.test_dataset
         else:
-            raise ValueError(f"Dataset for split '{split}' not initialized. Call setup() first.")
+            raise ValueError(f"划分 '{split}' 的数据集未初始化。请先调用 setup()")
         
-        # Get basic info
+        # 获取基本信息
         info = {
             'split': split,
             'total_length': len(dataset),
         }
         
-        # Add dataset-specific info if available
+        # 如果可用，添加数据集特定的信息
         if hasattr(dataset, 'data_list'):
             info['num_samples'] = len(dataset.data_list)
         if hasattr(dataset, 'loop'):
@@ -366,29 +365,29 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         return info
     
     def print_info(self):
-        """Print information about all initialized datasets."""
+        """打印所有已初始化数据集的信息"""
         print("=" * 60)
-        print(f"{self.__class__.__name__} Information")
+        print(f"{self.__class__.__name__} 信息")
         print("=" * 60)
-        print(f"Data root: {self.data_root}")
-        print(f"Use dynamic batch: {self.use_dynamic_batch}")
+        print(f"数据根目录: {self.data_root}")
+        print(f"使用动态批次: {self.use_dynamic_batch}")
         if self.use_dynamic_batch:
-            print(f"Max points per batch: {self.max_points}")
-            print(f"Weighted sampling: {'Yes' if self.train_sampler_weights is not None else 'No'}")
+            print(f"每批次最大点数: {self.max_points}")
+            print(f"加权采样: {'是' if self.train_sampler_weights is not None else '否'}")
         else:
-            print(f"Batch size: {self.batch_size}")
-        print(f"Num workers: {self.num_workers}")
-        print(f"Collate function: {type(self.collate_fn).__name__}")
+            print(f"批次大小: {self.batch_size}")
+        print(f"工作进程数: {self.num_workers}")
+        print(f"合并函数: {type(self.collate_fn).__name__}")
         print("-" * 60)
         
         for split in ['train', 'val', 'test']:
             try:
                 info = self.get_dataset_info(split)
-                print(f"{split.upper()} dataset:")
+                print(f"{split.upper()} 数据集:")
                 for key, value in info.items():
                     if key != 'split':
                         print(f"  - {key}: {value}")
             except ValueError:
-                print(f"{split.upper()} dataset: Not initialized")
+                print(f"{split.upper()} 数据集: 未初始化")
         
         print("=" * 60)

@@ -1,8 +1,7 @@
 """
-BinPkl format specific DataModule
+BinPkl 格式专用 DataModule
 
-This module provides a PyTorch Lightning DataModule specifically
-for the BinPkl dataset format.
+本模块提供了一个专门用于 BinPkl 数据集格式的 PyTorch Lightning DataModule
 """
 
 from typing import Optional, List, Dict
@@ -12,22 +11,21 @@ from .datasets.dataset_bin import BinPklDataset
 
 class BinPklDataModule(DataModuleBase):
     """
-    PyTorch Lightning DataModule for BinPkl format point cloud datasets.
+    BinPkl 格式点云数据集的 PyTorch Lightning DataModule
     
-    This DataModule is specifically designed for the bin+pkl data format,
-    where point cloud data is stored in binary files (.bin) with metadata
-    in pickle files (.pkl).
+    此 DataModule 专门为 bin+pkl 数据格式设计，
+    其中点云数据存储在二进制文件（.bin）中，元数据存储在 pickle 文件（.pkl）中
     
-    Features:
-    - Automatic setup of train/val/test datasets
-    - Support for DynamicBatchSampler for memory control
-    - Support for WeightedRandomSampler for class imbalance
-    - Configurable assets (coord, intensity, color, classification, etc.)
-    - Class label mapping support
-    - Data caching and looping options
+    特性：
+    - 自动设置训练/验证/测试数据集
+    - 支持 DynamicBatchSampler 进行内存控制
+    - 支持 WeightedRandomSampler 处理类别不平衡
+    - 可配置资产（坐标、强度、颜色、分类等）
+    - 支持类别标签映射
+    - 数据缓存和循环选项
     
-    Example:
-        >>> # Basic usage
+    示例：
+        >>> # 基本用法
         >>> datamodule = BinPklDataModule(
         ...     data_root='path/to/data',
         ...     train_files=['train.pkl'],
@@ -37,7 +35,7 @@ class BinPklDataModule(DataModuleBase):
         ... )
         >>> datamodule.setup()
         >>> 
-        >>> # With DynamicBatchSampler and weighted sampling
+        >>> # 使用 DynamicBatchSampler 和加权采样
         >>> datamodule = BinPklDataModule(
         ...     data_root='path/to/data',
         ...     use_dynamic_batch=True,
@@ -46,7 +44,7 @@ class BinPklDataModule(DataModuleBase):
         ...     assets=['coord', 'intensity', 'classification']
         ... )
         >>> 
-        >>> # Use with Trainer
+        >>> # 与 Trainer 一起使用
         >>> trainer = pl.Trainer()
         >>> trainer.fit(model, datamodule)
     """
@@ -76,37 +74,37 @@ class BinPklDataModule(DataModuleBase):
         **kwargs
     ):
         """
-        Initialize BinPklDataModule.
+        初始化 BinPklDataModule
         
-        Args:
-            data_root: Root directory containing the data files
-            train_files: List of training pkl file names. If None, auto-discover from data_root
-            val_files: List of validation pkl file names. If None, auto-discover from data_root
-            test_files: List of test pkl file names. If None, auto-discover from data_root
-            batch_size: Batch size for DataLoader (not used when use_dynamic_batch=True)
-            num_workers: Number of workers for data loading
-            assets: List of data attributes to load (e.g., ['coord', 'intensity', 'classification'])
-                   If None, uses default: ['coord', 'intensity', 'classification']
-            train_transforms: List of transforms for training data
-            val_transforms: List of transforms for validation data
-            test_transforms: List of transforms for test data
-            ignore_label: Label to ignore in training/evaluation
-            loop: Number of times to loop through training dataset (for data augmentation)
-            cache_data: Whether to cache loaded data in memory
-            class_mapping: Dict mapping original class labels to continuous labels
-                          Example: {0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
-            use_dynamic_batch: Whether to use DynamicBatchSampler (recommended for memory control)
-                              If True, batch_size parameter is ignored
-            max_points: Maximum points per batch (only used with use_dynamic_batch=True)
-            train_sampler_weights: Optional weights for WeightedRandomSampler (training only)
-                                  If provided, will create a WeightedRandomSampler for training
-                                  Can be used with use_dynamic_batch=True
-            pin_memory: Whether to use pinned memory in DataLoader (faster GPU transfer)
-            persistent_workers: Keep workers alive between epochs (faster but uses more memory)
-            prefetch_factor: Number of batches to prefetch per worker
-            **kwargs: Additional arguments passed to BinPklDataset
+        参数：
+            data_root: 包含数据文件的根目录
+            train_files: 训练 pkl 文件名列表。如果为 None，则从 data_root 自动发现
+            val_files: 验证 pkl 文件名列表。如果为 None，则从 data_root 自动发现
+            test_files: 测试 pkl 文件名列表。如果为 None，则从 data_root 自动发现
+            batch_size: DataLoader 的批次大小（当 use_dynamic_batch=True 时不使用）
+            num_workers: 数据加载的工作进程数
+            assets: 要加载的数据属性列表（例如 ['coord', 'intensity', 'classification']）
+                   如果为 None，则使用默认值：['coord', 'intensity', 'classification']
+            train_transforms: 训练数据的变换列表
+            val_transforms: 验证数据的变换列表
+            test_transforms: 测试数据的变换列表
+            ignore_label: 在训练/评估中忽略的标签
+            loop: 遍历训练数据集的次数（用于数据增强）
+            cache_data: 是否在内存中缓存加载的数据
+            class_mapping: 将原始类别标签映射到连续标签的字典
+                          示例：{0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
+            use_dynamic_batch: 是否使用 DynamicBatchSampler（推荐用于内存控制）
+                              如果为 True，batch_size 参数将被忽略
+            max_points: 每个批次的最大点数（仅在 use_dynamic_batch=True 时使用）
+            train_sampler_weights: WeightedRandomSampler 的可选权重（仅用于训练）
+                                  如果提供，将为训练创建 WeightedRandomSampler
+                                  可与 use_dynamic_batch=True 一起使用
+            pin_memory: 是否在 DataLoader 中使用固定内存（更快的 GPU 传输）
+            persistent_workers: 在 epoch 之间保持工作进程活动（更快但使用更多内存）
+            prefetch_factor: 每个工作进程预取的批次数
+            **kwargs: 传递给 BinPklDataset 的其他参数
         """
-        # Store BinPklDataset specific parameters
+        # 存储 BinPklDataset 特定参数
         self.assets = assets or ['coord', 'intensity', 'classification']
         self.ignore_label = ignore_label
         self.loop = loop
@@ -135,15 +133,15 @@ class BinPklDataModule(DataModuleBase):
     
     def _create_dataset(self, data_paths, split: str, transforms):
         """
-        Create a BinPklDataset instance for the given split.
+        为给定的数据集划分创建 BinPklDataset 实例
         
-        Args:
-            data_paths: Path(s) to the pkl files
-            split: Dataset split ('train', 'val', 'test')
-            transforms: List of transforms to apply
+        参数：
+            data_paths: pkl 文件的路径
+            split: 数据集划分（'train'、'val'、'test'）
+            transforms: 要应用的变换列表
             
-        Returns:
-            BinPklDataset instance
+        返回：
+            BinPklDataset 实例
         """
         return BinPklDataset(
             data_root=data_paths,
@@ -151,7 +149,7 @@ class BinPklDataModule(DataModuleBase):
             assets=self.assets,
             transform=transforms,
             ignore_label=self.ignore_label,
-            loop=self.loop if split == 'train' else 1,  # Only loop for training
+            loop=self.loop if split == 'train' else 1,  # 仅对训练进行循环
             cache_data=self.cache_data,
             class_mapping=self.class_mapping,
             **self.kwargs
@@ -159,17 +157,17 @@ class BinPklDataModule(DataModuleBase):
     
     def get_dataset_info(self, split: str = 'train') -> Dict:
         """
-        Get information about a dataset split.
+        获取数据集划分的信息
         
-        Args:
-            split: Dataset split ('train', 'val', 'test')
+        参数：
+            split: 数据集划分（'train'、'val'、'test'）
             
-        Returns:
-            Dict containing dataset information including BinPkl-specific info
+        返回：
+            包含数据集信息的字典，包括 BinPkl 特定信息
         """
         info = super().get_dataset_info(split)
         
-        # Add BinPkl-specific information
+        # 添加 BinPkl 特定信息
         info['dataset_type'] = 'BinPklDataset'
         info['assets'] = self.assets
         info['ignore_label'] = self.ignore_label
@@ -179,41 +177,41 @@ class BinPklDataModule(DataModuleBase):
         return info
     
     def print_info(self):
-        """Print information about all initialized datasets with BinPkl-specific details."""
+        """打印所有已初始化数据集的信息，包括 BinPkl 特定详情"""
         print("=" * 60)
-        print("BinPklDataModule Information")
+        print("BinPklDataModule 信息")
         print("=" * 60)
-        print(f"Data root: {self.data_root}")
-        print(f"Dataset type: BinPklDataset")
-        print(f"Assets: {self.assets}")
-        print(f"Ignore label: {self.ignore_label}")
-        print(f"Loop (train): {self.loop}")
-        print(f"Cache data: {self.cache_data}")
+        print(f"数据根目录: {self.data_root}")
+        print(f"数据集类型: BinPklDataset")
+        print(f"资产: {self.assets}")
+        print(f"忽略标签: {self.ignore_label}")
+        print(f"循环次数（训练）: {self.loop}")
+        print(f"缓存数据: {self.cache_data}")
         if self.class_mapping:
-            print(f"Class mapping: {self.class_mapping}")
-        print(f"Use dynamic batch: {self.use_dynamic_batch}")
+            print(f"类别映射: {self.class_mapping}")
+        print(f"使用动态批次: {self.use_dynamic_batch}")
         if self.use_dynamic_batch:
-            print(f"Max points per batch: {self.max_points}")
-            print(f"Weighted sampling: {'Yes' if self.train_sampler_weights is not None else 'No'}")
+            print(f"每批次最大点数: {self.max_points}")
+            print(f"加权采样: {'是' if self.train_sampler_weights is not None else '否'}")
         else:
-            print(f"Batch size: {self.batch_size}")
-        print(f"Num workers: {self.num_workers}")
-        print(f"Collate function: {type(self.collate_fn).__name__}")
+            print(f"批次大小: {self.batch_size}")
+        print(f"工作进程数: {self.num_workers}")
+        print(f"合并函数: {type(self.collate_fn).__name__}")
         print("-" * 60)
         
         for split in ['train', 'val', 'test']:
             try:
                 info = super().get_dataset_info(split)
-                print(f"{split.upper()} dataset:")
-                print(f"  - Samples: {info.get('num_samples', 'N/A')}")
-                print(f"  - Total length (with loop): {info['total_length']}")
-                print(f"  - Loop: {info.get('loop', 1)}")
-                print(f"  - Cache: {info.get('cache_enabled', False)}")
+                print(f"{split.upper()} 数据集:")
+                print(f"  - 样本数: {info.get('num_samples', '不适用')}")
+                print(f"  - 总长度（含循环）: {info['total_length']}")
+                print(f"  - 循环: {info.get('loop', 1)}")
+                print(f"  - 缓存: {info.get('cache_enabled', False)}")
             except ValueError:
-                print(f"{split.upper()} dataset: Not initialized")
+                print(f"{split.upper()} 数据集: 未初始化")
         
         print("=" * 60)
 
 
-# Backward compatibility: alias for the old name
+# 向后兼容：旧名称的别名
 PointDataModule = BinPklDataModule

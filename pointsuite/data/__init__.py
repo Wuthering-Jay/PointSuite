@@ -1,26 +1,26 @@
 """
-PointSuite Data Module
+PointSuite 数据模块
 
-This package provides PyTorch Lightning compatible DataModules and Datasets
-for point cloud data loading and processing.
+本包提供与 PyTorch Lightning 兼容的 DataModule 和 Dataset，
+用于点云数据加载和处理
 
-Main components:
-- DataModuleBase: Abstract base class for data modules
-- BinPklDataModule: DataModule for bin+pkl format datasets  
-- PointDataModule: Alias for BinPklDataModule (backward compatibility)
-- BinPklDataset: Dataset for bin+pkl format
-- Various transforms and collate functions
+主要组件：
+- DataModuleBase: 数据模块的抽象基类
+- BinPklDataModule: bin+pkl 格式数据集的 DataModule
+- PointDataModule: BinPklDataModule 的别名（向后兼容）
+- BinPklDataset: bin+pkl 格式的数据集
+- 各种变换和合并函数
 """
 
-# Base classes
+# 基类
 from .datamodule_base import DataModuleBase
 from .datamodule_binpkl import BinPklDataModule, PointDataModule
 
-# Datasets
+# 数据集
 from .datasets.dataset_base import DatasetBase
 from .datasets.dataset_bin import BinPklDataset
 
-# Collate functions
+# 合并函数
 from .datasets.collate import (
     collate_fn,
     LimitedPointsCollateFn,
@@ -29,16 +29,16 @@ from .datasets.collate import (
 )
 
 __all__ = [
-    # DataModules
+    # 数据模块
     'DataModuleBase',
     'BinPklDataModule',
-    'PointDataModule',  # Backward compatibility
+    'PointDataModule',  # 向后兼容
     
-    # Datasets
+    # 数据集
     'DatasetBase',
     'BinPklDataset',
     
-    # Collate functions
+    # 合并函数
     'collate_fn',
     'LimitedPointsCollateFn',
     'DynamicBatchSampler',

@@ -1,8 +1,8 @@
 """
-Dataset for loading bin+pkl format point cloud data.
+用于加载 bin+pkl 格式点云数据的数据集
 
-This module implements the dataset class for our custom bin+pkl data format,
-where point cloud data is stored in binary files (.bin) with metadata in pickle files (.pkl).
+本模块实现了我们自定义 bin+pkl 数据格式的数据集类，
+其中点云数据存储在二进制文件（.bin）中，元数据存储在 pickle 文件（.pkl）中
 """
 import numpy as np
 import pickle
@@ -14,19 +14,19 @@ from .dataset_base import DatasetBase
 
 class BinPklDataset(DatasetBase):
     """
-    Dataset class specifically for bin+pkl format point cloud data.
+    bin+pkl 格式点云数据的数据集类
     
-    This dataset loads pre-processed point cloud segments stored in binary format (.bin)
-    with metadata stored in pickle format (.pkl).
+    此数据集加载以二进制格式（.bin）存储的预处理点云片段，
+    元数据以 pickle 格式（.pkl）存储
     
-    Data structure:
-    - .bin file: Contains all point data in structured numpy array format
-    - .pkl file: Contains metadata including:
-        - segment information (indices, bounds, label counts)
-        - original LAS file header
-        - processing parameters (window_size, grid_size, etc.)
+    数据结构：
+    - .bin 文件：以结构化 numpy 数组格式包含所有点数据
+    - .pkl 文件：包含元数据，包括：
+        - 片段信息（索引、边界、标签计数）
+        - 原始 LAS 文件头
+        - 处理参数（window_size、grid_size 等）
     
-    Each segment becomes one training sample.
+    每个片段成为一个训练样本
     """
     
     def __init__(
@@ -41,38 +41,38 @@ class BinPklDataset(DatasetBase):
         class_mapping=None,
     ):
         """
-        Initialize BinPklDataset.
+        初始化 BinPklDataset
         
-        Args:
-            data_root: Root directory containing bin+pkl files, or a single pkl file path,
-                      or a list of pkl file paths
-            split: Dataset split ('train', 'val', 'test')
+        参数：
+            data_root: 包含 bin+pkl 文件的根目录，或单个 pkl 文件路径，
+                      或 pkl 文件路径列表
+            split: 数据集划分（'train'、'val'、'test'）
                   - train/val: 不存储点索引
                   - test: 存储点索引用于预测投票机制
-            assets: List of data attributes to load (default: ['coord', 'intensity', 'classification'])
-            transform: Data transforms to apply
-            ignore_label: Label to ignore in training
-            loop: Number of times to loop through dataset (for training)
-            cache_data: Whether to cache loaded data in memory.
-                       - If True: All loaded samples are cached in memory for faster repeated access.
-                                 Suitable for small datasets that fit in RAM.
-                       - If False: Data is loaded from disk each time (using memmap for efficiency).
-                                  Suitable for large datasets.
-            class_mapping: Dict mapping original class labels to continuous labels.
-                          Example: {0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
-                          If None, no mapping is applied.
+            assets: 要加载的数据属性列表（默认：['coord', 'intensity', 'classification']）
+            transform: 要应用的数据变换
+            ignore_label: 在训练中忽略的标签
+            loop: 遍历数据集的次数（用于训练）
+            cache_data: 是否在内存中缓存加载的数据
+                       - 如果为 True：所有加载的样本都缓存在内存中以加快重复访问
+                                     适用于能放入 RAM 的小型数据集
+                       - 如果为 False：每次从磁盘加载数据（使用 memmap 提高效率）
+                                      适用于大型数据集
+            class_mapping: 将原始类别标签映射到连续标签的字典
+                          示例：{0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
+                          如果为 None，则不应用映射
         """
-        # Set default assets if not specified
+        # 如果未指定，则设置默认资产
         if assets is None:
             assets = ['coord', 'intensity', 'classification']
         
-        # Store class mapping
+        # 存储类别映射
         self.class_mapping = class_mapping
         
-        # Initialize metadata cache (significantly speeds up data loading)
+        # 初始化元数据缓存（显著加快数据加载速度）
         self._metadata_cache = {}
         
-        # Call parent init
+        # 调用父类初始化
         super().__init__(
             data_root=data_root,
             split=split,
@@ -85,50 +85,50 @@ class BinPklDataset(DatasetBase):
     
     def _load_data_list(self) -> List[Dict[str, Any]]:
         """
-        Load list of all data samples.
+        加载所有数据样本的列表
         
-        Returns:
-            List of dicts containing sample information
+        返回：
+            包含样本信息的字典列表
         """
         data_list = []
         
-        # Handle different data_root types
+        # 处理不同的 data_root 类型
         pkl_files = []
         
         if isinstance(self.data_root, (list, tuple)):
-            # List of pkl file paths
+            # pkl 文件路径列表
             pkl_files = [Path(p) for p in self.data_root]
-            print(f"Loading from {len(pkl_files)} specified pkl files")
+            print(f"从 {len(pkl_files)} 个指定的 pkl 文件加载")
         elif self.data_root.is_file() and self.data_root.suffix == '.pkl':
-            # Single pkl file
+            # 单个 pkl 文件
             pkl_files = [self.data_root]
-            print(f"Loading from single pkl file: {self.data_root.name}")
+            print(f"从单个 pkl 文件加载: {self.data_root.name}")
         else:
-            # Directory containing pkl files
+            # 包含 pkl 文件的目录
             pkl_files = sorted(self.data_root.glob('*.pkl'))
             if len(pkl_files) == 0:
-                raise ValueError(f"No pkl files found in {self.data_root}")
-            print(f"Found {len(pkl_files)} pkl files in directory")
+                raise ValueError(f"在 {self.data_root} 中未找到 pkl 文件")
+            print(f"在目录中找到 {len(pkl_files)} 个 pkl 文件")
         
-        # Load metadata from each pkl file
+        # 从每个 pkl 文件加载元数据
         total_segments = 0
         
         for pkl_path in pkl_files:
             if not pkl_path.exists():
-                print(f"Warning: {pkl_path} not found, skipping")
+                print(f"警告: {pkl_path} 未找到，跳过")
                 continue
                 
             bin_path = pkl_path.with_suffix('.bin')
             
             if not bin_path.exists():
-                print(f"Warning: {bin_path.name} not found, skipping {pkl_path.name}")
+                print(f"警告: {bin_path.name} 未找到，跳过 {pkl_path.name}")
                 continue
             
-            # Load pkl metadata
+            # 加载 pkl 元数据
             with open(pkl_path, 'rb') as f:
                 metadata = pickle.load(f)
             
-            # Add each segment as a separate data sample
+            # 将每个片段添加为单独的数据样本
             for segment_info in metadata['segments']:
                 total_segments += 1
                 
@@ -148,27 +148,27 @@ class BinPklDataset(DatasetBase):
                     }
                 })
         
-        print(f"Loaded {total_segments} segments from {len(pkl_files)} files")
+        print(f"从 {len(pkl_files)} 个文件加载了 {total_segments} 个片段")
         
         return data_list
     
     def _load_data(self, idx: int) -> Dict[str, Any]:
         """
-        Load a specific data sample.
+        加载特定的数据样本
         
-        Args:
-            idx: Index of the sample to load
+        参数：
+            idx: 要加载的样本索引
             
-        Returns:
-            Dict containing loaded data (coord, intensity, classification, etc.)
+        返回：
+            包含加载数据的字典（coord、intensity、classification 等）
         """
         sample_info = self.data_list[idx]
         
-        # Get paths
+        # 获取路径
         bin_path = Path(sample_info['bin_path'])
         segment_id = sample_info['segment_id']
         
-        # Load pkl metadata (with caching to avoid repeated disk I/O)
+        # 加载 pkl 元数据（使用缓存避免重复磁盘 I/O）
         pkl_path = Path(sample_info['pkl_path'])
         pkl_key = str(pkl_path)
         
@@ -178,7 +178,7 @@ class BinPklDataset(DatasetBase):
         
         metadata = self._metadata_cache[pkl_key]
         
-        # Find the segment info
+        # 查找片段信息
         segment_info = None
         for seg in metadata['segments']:
             if seg['segment_id'] == segment_id:
@@ -186,63 +186,63 @@ class BinPklDataset(DatasetBase):
                 break
         
         if segment_info is None:
-            raise ValueError(f"Segment {segment_id} not found in {pkl_path}")
+            raise ValueError(f"在 {pkl_path} 中未找到片段 {segment_id}")
         
-        # Load point data from bin file using memmap
+        # 使用 memmap 从 bin 文件加载点数据
         point_data = np.memmap(bin_path, dtype=metadata['dtype'], mode='r')
         
-        # Extract segment points using discrete indices
-        # Point cloud data always uses discrete indices (non-continuous)
+        # 使用离散索引提取片段点
+        # 点云数据始终使用离散索引（非连续）
         if 'indices' not in segment_info:
-            raise ValueError(f"Segment info must contain 'indices' field")
+            raise ValueError(f"片段信息必须包含 'indices' 字段")
         
         indices = segment_info['indices']
         segment_points = point_data[indices]
         
-        # Extract requested assets
+        # 提取请求的资产
         data = {}
-        features = []  # Will store [coord, intensity, color, ...] in order
+        features = []  # 将按顺序存储 [coord, intensity, color, ...]
         
-        # Always extract coord first
+        # 总是首先提取 coord
         coord = np.stack([
             segment_points['X'],
             segment_points['Y'],
             segment_points['Z']
         ], axis=1).astype(np.float32)
         data['coord'] = coord
-        features.append(coord)  # coord is always first in feature
+        features.append(coord)  # coord 始终是特征中的第一个
         
-        # Extract other features according to assets order
+        # 根据资产顺序提取其他特征
         for asset in self.assets:
             if asset == 'coord':
-                continue  # Already handled
+                continue  # 已处理
                 
             elif asset == 'intensity':
-                # Normalize intensity to [0, 1]
+                # 将强度归一化到 [0, 1]
                 intensity = segment_points['intensity'].astype(np.float32)
                 if intensity.max() > 0:
-                    intensity = intensity / 65535.0  # Assuming 16-bit intensity
+                    intensity = intensity / 65535.0  # 假设为 16 位强度
                 intensity = intensity[:, np.newaxis]  # [N, 1]
                 features.append(intensity)
                 
             elif asset == 'color' and all(c in segment_points.dtype.names for c in ['red', 'green', 'blue']):
-                # Extract and normalize RGB colors
+                # 提取并归一化 RGB 颜色
                 color = np.stack([
                     segment_points['red'],
                     segment_points['green'],
                     segment_points['blue']
                 ], axis=1).astype(np.float32)
                 if color.max() > 0:
-                    color = color / 65535.0  # Assuming 16-bit color
+                    color = color / 65535.0  # 假设为 16 位颜色
                 features.append(color)  # [N, 3]
                 
             elif asset == 'classification':
-                # Store separately as target, not in feature
+                # 单独存储为目标，而不是在特征中
                 classification = segment_points['classification'].astype(np.int64)
                 
-                # Apply class mapping if provided
+                # 如果提供了类别映射则应用
                 if self.class_mapping is not None:
-                    # Create a copy to avoid modifying original data
+                    # 创建副本以避免修改原始数据
                     mapped_classification = classification.copy()
                     for original_label, new_label in self.class_mapping.items():
                         mapped_classification[classification == original_label] = new_label
@@ -258,27 +258,27 @@ class BinPklDataset(DatasetBase):
                 num_returns = segment_points['number_of_returns'].astype(np.float32)[:, np.newaxis]
                 features.append(num_returns)
         
-        # Concatenate all features: [coord, intensity, color, ...]
+        # 连接所有特征：[coord, intensity, color, ...]
         data['feature'] = np.concatenate(features, axis=1).astype(np.float32)
         
-        # In test split, store point indices for voting mechanism
+        # 在测试划分中，存储点索引用于投票机制
         if self.split == 'test':
-            data['indices'] = indices.copy()  # Store original point indices
+            data['indices'] = indices.copy()  # 存储原始点索引
         
         return data
     
     def get_segment_info(self, idx: int) -> Dict[str, Any]:
         """
-        Get metadata for a specific segment.
+        获取特定片段的元数据
         
-        Args:
-            idx: Index of the segment
+        参数：
+            idx: 片段的索引
             
-        Returns:
-            Dict containing segment metadata
+        返回：
+            包含片段元数据的字典
         """
         if idx < 0 or idx >= len(self.data_list):
-            raise IndexError(f"Index {idx} out of range [0, {len(self.data_list)})")
+            raise IndexError(f"索引 {idx} 超出范围 [0, {len(self.data_list)})")
         
         sample_info = self.data_list[idx]
         pkl_path = Path(sample_info['pkl_path'])
@@ -286,26 +286,26 @@ class BinPklDataset(DatasetBase):
         with open(pkl_path, 'rb') as f:
             metadata = pickle.load(f)
         
-        # Find the segment info
+        # 查找片段信息
         segment_id = sample_info['segment_id']
         for seg in metadata['segments']:
             if seg['segment_id'] == segment_id:
                 return seg
         
-        raise ValueError(f"Segment {segment_id} not found")
+        raise ValueError(f"未找到片段 {segment_id}")
     
     def get_file_metadata(self, idx: int) -> Dict[str, Any]:
         """
-        Get metadata for the file containing a specific segment.
+        获取包含特定片段的文件的元数据
         
-        Args:
-            idx: Index of the segment
+        参数：
+            idx: 片段的索引
             
-        Returns:
-            Dict containing file-level metadata
+        返回：
+            包含文件级元数据的字典
         """
         if idx < 0 or idx >= len(self.data_list):
-            raise IndexError(f"Index {idx} out of range [0, {len(self.data_list)})")
+            raise IndexError(f"索引 {idx} 超出范围 [0, {len(self.data_list)})")
         
         sample_info = self.data_list[idx]
         pkl_path = Path(sample_info['pkl_path'])
@@ -313,21 +313,21 @@ class BinPklDataset(DatasetBase):
         with open(pkl_path, 'rb') as f:
             metadata = pickle.load(f)
         
-        # Return metadata excluding the segments list (which can be large)
+        # 返回元数据，排除片段列表（可能很大）
         file_metadata = {k: v for k, v in metadata.items() if k != 'segments'}
         return file_metadata
     
     def get_stats(self) -> Dict[str, Any]:
         """
-        Get dataset statistics.
+        获取数据集统计信息
         
-        Returns:
-            Dict containing dataset statistics
+        返回：
+            包含数据集统计信息的字典
         """
         if len(self.data_list) == 0:
             return {}
         
-        # Collect statistics
+        # 收集统计信息
         num_points_list = [s['num_points'] for s in self.data_list]
         
         stats = {
@@ -342,7 +342,7 @@ class BinPklDataset(DatasetBase):
             }
         }
         
-        # Get label distribution from first file
+        # 从第一个文件获取标签分布
         if len(self.data_list) > 0:
             pkl_path = Path(self.data_list[0]['pkl_path'])
             with open(pkl_path, 'rb') as f:
@@ -354,26 +354,26 @@ class BinPklDataset(DatasetBase):
         return stats
     
     def print_stats(self):
-        """Print dataset statistics."""
+        """打印数据集统计信息"""
         stats = self.get_stats()
         
         print("="*70)
-        print("Dataset Statistics")
+        print("数据集统计信息")
         print("="*70)
-        print(f"Split: {self.split}")
-        print(f"Samples: {stats['num_samples']:,}")
-        print(f"\nPoints per sample:")
-        print(f"  - Total: {stats['num_points']['total']:,}")
-        print(f"  - Mean: {stats['num_points']['mean']:,.1f}")
-        print(f"  - Median: {stats['num_points']['median']:,.0f}")
-        print(f"  - Min: {stats['num_points']['min']:,}")
-        print(f"  - Max: {stats['num_points']['max']:,}")
-        print(f"  - Std: {stats['num_points']['std']:,.1f}")
+        print(f"划分: {self.split}")
+        print(f"样本数: {stats['num_samples']:,}")
+        print(f"\n每样本点数:")
+        print(f"  - 总计: {stats['num_points']['total']:,}")
+        print(f"  - 平均: {stats['num_points']['mean']:,.1f}")
+        print(f"  - 中位数: {stats['num_points']['median']:,.0f}")
+        print(f"  - 最小: {stats['num_points']['min']:,}")
+        print(f"  - 最大: {stats['num_points']['max']:,}")
+        print(f"  - 标准差: {stats['num_points']['std']:,.1f}")
         
         if 'label_distribution' in stats:
-            print(f"\nLabel distribution (overall):")
+            print(f"\n标签分布（整体）:")
             for label, count in sorted(stats['label_distribution'].items()):
-                print(f"  Class {label}: {count:,}")
+                print(f"  类别 {label}: {count:,}")
         
         print("="*70)
 
@@ -389,20 +389,20 @@ def create_dataset(
     **kwargs
 ):
     """
-    Factory function to create BinPklDataset.
+    创建 BinPklDataset 的工厂函数
     
-    Args:
-        data_root: Root directory, single pkl file, or list of pkl files
-        split: Dataset split ('train', 'val', 'test')
-        assets: List of data attributes to load
-        transform: Data transforms
-        ignore_label: Label to ignore
-        loop: Dataset loop factor
-        cache_data: Whether to cache data
-        **kwargs: Additional arguments
+    参数：
+        data_root: 根目录、单个 pkl 文件或 pkl 文件列表
+        split: 数据集划分（'train'、'val'、'test'）
+        assets: 要加载的数据属性列表
+        transform: 数据变换
+        ignore_label: 要忽略的标签
+        loop: 数据集循环因子
+        cache_data: 是否缓存数据
+        **kwargs: 其他参数
         
-    Returns:
-        BinPklDataset instance
+    返回：
+        BinPklDataset 实例
     """
     return BinPklDataset(
         data_root=data_root,
