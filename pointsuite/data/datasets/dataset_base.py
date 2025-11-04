@@ -23,9 +23,9 @@ class DatasetBase(Dataset, ABC):
         "color",  # RGB 颜色
         "normal",  # 法向量
         "intensity",  # 强度
-        "return_number",  # 回波编号
-        "number_of_returns",  # 回波总数
-        "classification",  # 分类标签
+        "echo",  # 回波信息
+        "h_norm",  # 归一化高程
+        "class",  # 分类标签
     ]
 
     def __init__(

@@ -152,15 +152,196 @@ class BinPklDataset(DatasetBase):
         
         return data_list
     
+    def _compute_h_norm(self, coord: np.ndarray, is_ground: np.ndarray, 
+                       grid_resolution: float = 1.0) -> np.ndarray:
+        """
+        基于地面点标记计算归一化高程（地上高程）
+        
+        采用 TIN + Raster 混合方法（工业界标准）：
+        1. 使用 TIN 插值生成 DTM（数字地形模型）栅格
+        2. 通过快速栅格查询计算所有点的地面高程
+        3. 对 DTM 未覆盖区域使用 KNN 回退策略
+        
+        优势：
+        - 速度：栅格查询 O(1)，比 KNN 快得多
+        - 精度：TIN 插值保持地面点的几何精度
+        - 内存友好：栅格大小可控
+        
+        参数：
+            coord: [N, 3] 点云坐标 (X, Y, Z)
+            is_ground: [N,] 地面点标记，1 表示地面点，0 表示非地面点
+            grid_resolution: DTM 栅格分辨率（米），默认 0.5m
+                            更小的值 = 更精确但更慢、占用更多内存
+                            更大的值 = 更快但精度稍低
+            
+        返回：
+            h_norm: [N,] 归一化高程（地上高程），单位与输入坐标相同
+        """
+        # 提取地面点
+        ground_mask = (is_ground == 1)
+        
+        # 如果没有地面点，返回相对于最低点的高度
+        if not np.any(ground_mask):
+            z_min = coord[:, 2].min()
+            return (coord[:, 2] - z_min).astype(np.float32)
+        
+        ground_points = coord[ground_mask]
+        ground_xy = ground_points[:, :2]
+        ground_z = ground_points[:, 2]
+        n_ground = len(ground_points)
+        
+        # 策略选择：根据地面点数量选择最优方法
+        
+        if n_ground < 10:
+            # 地面点太少：使用全局最小值方法
+            ground_z_base = ground_z.min()
+            h_norm = coord[:, 2] - ground_z_base
+            
+        elif n_ground < 50:
+            # 地面点很少：使用简单 KNN（不值得构建栅格）
+            from scipy.spatial import cKDTree
+            tree = cKDTree(ground_xy)
+            k = min(3, n_ground)
+            distances, indices = tree.query(coord[:, :2], k=k)
+            
+            if k == 1:
+                local_ground_z = ground_z[indices]
+            else:
+                weights = 1.0 / (distances + 1e-8)
+                weights = weights / weights.sum(axis=1, keepdims=True)
+                local_ground_z = (ground_z[indices] * weights).sum(axis=1)
+            
+            h_norm = coord[:, 2] - local_ground_z
+            
+        else:
+            # 地面点足够：使用 TIN + Raster 混合方法（推荐）
+            h_norm = self._compute_h_norm_tin_raster(
+                coord, ground_xy, ground_z, grid_resolution
+            )
+        
+        return h_norm.astype(np.float32)
+    
+    def _compute_h_norm_tin_raster(self, coord: np.ndarray, ground_xy: np.ndarray, 
+                                   ground_z: np.ndarray, grid_resolution: float) -> np.ndarray:
+        """
+        使用 TIN + Raster 混合方法计算 h_norm（核心算法）
+        
+        步骤：
+        1. 用 scipy.interpolate.griddata 构建 TIN 并插值到规则栅格
+        2. 将所有点坐标映射到栅格索引
+        3. 快速查询栅格得到地面高程
+        4. 对 DTM 未覆盖区域（NaN）使用 KNN 回退
+        
+        参数：
+            coord: [N, 3] 所有点坐标
+            ground_xy: [M, 2] 地面点 XY 坐标
+            ground_z: [M,] 地面点 Z 坐标
+            grid_resolution: DTM 栅格分辨率
+            
+        返回：
+            h_norm: [N,] 归一化高程
+        """
+        from scipy.interpolate import griddata
+        
+        # ===== 步骤 1: 定义 DTM 栅格 =====
+        x_min, y_min = coord[:, :2].min(axis=0)
+        x_max, y_max = coord[:, :2].max(axis=0)
+        
+        # 计算栅格大小（向上取整）
+        n_x = int(np.ceil((x_max - x_min) / grid_resolution)) + 1
+        n_y = int(np.ceil((y_max - y_min) / grid_resolution)) + 1
+        
+        # 限制栅格大小（防止内存爆炸）
+        MAX_GRID_SIZE = 2000  # 最大 2000x2000 = 400 万格子
+        if n_x > MAX_GRID_SIZE or n_y > MAX_GRID_SIZE:
+            # 动态调整分辨率
+            grid_resolution = max(
+                (x_max - x_min) / MAX_GRID_SIZE,
+                (y_max - y_min) / MAX_GRID_SIZE
+            )
+            n_x = int(np.ceil((x_max - x_min) / grid_resolution)) + 1
+            n_y = int(np.ceil((y_max - y_min) / grid_resolution)) + 1
+        
+        # 创建规则栅格
+        grid_x = np.linspace(x_min, x_max, n_x)
+        grid_y = np.linspace(y_min, y_max, n_y)
+        grid_xx, grid_yy = np.meshgrid(grid_x, grid_y)
+        
+        # ===== 步骤 2: TIN 插值生成 DTM =====
+        # 使用 'linear' 方法（Delaunay 三角网）
+        # 'cubic' 更平滑但更慢，'nearest' 最快但质量差
+        dtm_grid = griddata(
+            ground_xy,           # 稀疏地面点 XY
+            ground_z,            # 稀疏地面点 Z
+            (grid_xx, grid_yy),  # 目标栅格
+            method='linear',     # TIN 方法
+            fill_value=np.nan    # 无法插值区域填充 NaN
+        )
+        
+        # ===== 步骤 3: 计算所有点的栅格索引 =====
+        # 将真实坐标映射到栅格索引
+        indices_x = ((coord[:, 0] - x_min) / grid_resolution).astype(int)
+        indices_y = ((coord[:, 1] - y_min) / grid_resolution).astype(int)
+        
+        # 防止索引越界（边界点可能超出）
+        indices_x = np.clip(indices_x, 0, dtm_grid.shape[1] - 1)
+        indices_y = np.clip(indices_y, 0, dtm_grid.shape[0] - 1)
+        
+        # ===== 步骤 4: 快速栅格查询 =====
+        # 注意：meshgrid 创建的数组是 (n_y, n_x) 形状
+        z_ground = dtm_grid[indices_y, indices_x]
+        
+        # ===== 步骤 5: 处理 DTM 未覆盖区域（NaN） =====
+        nan_mask = np.isnan(z_ground)
+        
+        if np.any(nan_mask):
+            # DTM 未覆盖的点（通常在边界或地面点稀疏区域）
+            # 使用 KNN 回退策略：查询最近的地面点
+            from scipy.spatial import cKDTree
+            
+            tree = cKDTree(ground_xy)
+            # 对 NaN 点查询最近的 3 个地面点
+            k = min(3, len(ground_xy))
+            nan_points = coord[nan_mask, :2]
+            
+            if k == 1:
+                _, indices = tree.query(nan_points, k=1)
+                z_ground[nan_mask] = ground_z[indices]
+            else:
+                distances, indices = tree.query(nan_points, k=k)
+                # 距离加权平均
+                weights = 1.0 / (distances + 1e-8)
+                weights = weights / weights.sum(axis=1, keepdims=True)
+                z_ground[nan_mask] = (ground_z[indices] * weights).sum(axis=1)
+        
+        # ===== 步骤 6: 计算归一化高程 =====
+        h_norm = coord[:, 2] - z_ground
+        
+        return h_norm
+    
     def _load_data(self, idx: int) -> Dict[str, Any]:
         """
         加载特定的数据样本
+        
+        重要：此方法返回的数据字典中各个特征（coord、intensity、color 等）是独立的，
+        不会预先拼接成 feature。这样 transforms.py 中的数据增强才能正确处理各个特征。
+        最终的 feature 拼接应该在 transforms 之后通过 Collect 变换完成。
         
         参数：
             idx: 要加载的样本索引
             
         返回：
-            包含加载数据的字典（coord、intensity、classification 等）
+            包含加载数据的字典，包括：
+            - coord: [N, 3] 坐标（必需）
+            - intensity: [N,] 强度值（如果在 assets 中）
+            - color: [N, 3] RGB 颜色，范围 [0, 255]（如果在 assets 中）
+            - echo: [N, 2] 回波信息，范围 [-1, 1]（如果在 assets 中）
+                - 第 0 列：是否首次回波
+                - 第 1 列：是否末次回波
+            - normal: [N, 3] 法向量（如果在 assets 中）
+            - h_norm: [N,] 高度归一化值（如果在 assets 中）
+            - class: [N,] 分类标签（如果在 assets 中）
+            - indices: [N,] 原始点索引（仅在 test split 中）
         """
         sample_info = self.data_list[idx]
         
@@ -200,8 +381,10 @@ class BinPklDataset(DatasetBase):
         segment_points = point_data[indices]
         
         # 提取请求的资产
+        # 注意：不在这里拼接 feature，而是保持各个特征独立
+        # 这样 transforms.py 中的数据增强可以分别处理 intensity、color 等
+        # 最后通过 Collect 变换来拼接所有特征
         data = {}
-        features = []  # 将按顺序存储 [coord, intensity, color, ...]
         
         # 总是首先提取 coord
         coord = np.stack([
@@ -210,34 +393,61 @@ class BinPklDataset(DatasetBase):
             segment_points['Z']
         ], axis=1).astype(np.float32)
         data['coord'] = coord
-        features.append(coord)  # coord 始终是特征中的第一个
         
-        # 根据资产顺序提取其他特征
+        # 根据资产顺序提取其他特征（保持独立，不拼接）
         for asset in self.assets:
             if asset == 'coord':
                 continue  # 已处理
                 
             elif asset == 'intensity':
-                # 将强度归一化到 [0, 1]
+                # 提取原始强度值（保持原始位数，不归一化）
+                # 归一化应在 transforms 中完成，如 AutoNormalizeIntensity
                 intensity = segment_points['intensity'].astype(np.float32)
-                if intensity.max() > 0:
-                    intensity = intensity / 65535.0  # 假设为 16 位强度
-                intensity = intensity[:, np.newaxis]  # [N, 1]
-                features.append(intensity)
+                data['intensity'] = intensity  # [N,]
                 
             elif asset == 'color' and all(c in segment_points.dtype.names for c in ['red', 'green', 'blue']):
-                # 提取并归一化 RGB 颜色
+                # 提取原始 RGB 颜色值（保持原始位数，不归一化）
+                # 归一化应在 transforms 中完成，如 AutoNormalizeColor
                 color = np.stack([
                     segment_points['red'],
                     segment_points['green'],
                     segment_points['blue']
                 ], axis=1).astype(np.float32)
-                if color.max() > 0:
-                    color = color / 65535.0  # 假设为 16 位颜色
-                features.append(color)  # [N, 3]
-                
-            elif asset == 'classification':
-                # 单独存储为目标，而不是在特征中
+                data['color'] = color  # [N, 3]
+
+            elif asset == 'echo' and all(c in segment_points.dtype.names for c in ['return_number', 'number_of_returns']):
+                # 提取回波信息
+                is_first = (segment_points['return_number'] == 1).astype(np.float32)
+                is_last = (segment_points['return_number'] == segment_points['number_of_returns']).astype(np.float32)
+                # 转换为 [-1, 1] 范围：True -> 1, False -> -1
+                is_first = is_first * 2.0 - 1.0
+                is_last = is_last * 2.0 - 1.0
+                echo = np.stack([is_first, is_last], axis=1)  # [N, 2]
+                data['echo'] = echo  # [N, 2]
+
+            elif asset == 'normal' and all(c in segment_points.dtype.names for c in ['normal_x', 'normal_y', 'normal_z']):
+                # 提取法向量
+                normal = np.stack([
+                    segment_points['normal_x'],
+                    segment_points['normal_y'],
+                    segment_points['normal_z']
+                ], axis=1).astype(np.float32)
+                data['normal'] = normal  # [N, 3]
+
+            elif asset == 'h_norm':
+                # 计算归一化高程（地上高程）
+                # 如果 bin 文件中已有预计算的 h_norm，直接使用
+                if 'h_norm' in segment_points.dtype.names:
+                    h_norm = segment_points['h_norm'].astype(np.float32)
+                # 否则，基于 is_ground 字段动态计算
+                elif 'is_ground' in segment_points.dtype.names:
+                    h_norm = self._compute_h_norm(coord, segment_points['is_ground'])
+                else:
+                    raise ValueError("既没有 'h_norm' 也没有 'is_ground' 字段，无法计算归一化高程")
+                data['h_norm'] = h_norm
+
+            elif asset == 'class':
+                # 单独存储分类标签为目标
                 classification = segment_points['classification'].astype(np.int64)
                 
                 # 如果提供了类别映射则应用
@@ -246,21 +456,10 @@ class BinPklDataset(DatasetBase):
                     mapped_classification = classification.copy()
                     for original_label, new_label in self.class_mapping.items():
                         mapped_classification[classification == original_label] = new_label
-                    data['classification'] = mapped_classification
+                    data['class'] = mapped_classification
                 else:
-                    data['classification'] = classification
-                
-            elif asset == 'return_number' and 'return_number' in segment_points.dtype.names:
-                return_num = segment_points['return_number'].astype(np.float32)[:, np.newaxis]
-                features.append(return_num)
-                
-            elif asset == 'number_of_returns' and 'number_of_returns' in segment_points.dtype.names:
-                num_returns = segment_points['number_of_returns'].astype(np.float32)[:, np.newaxis]
-                features.append(num_returns)
-        
-        # 连接所有特征：[coord, intensity, color, ...]
-        data['feature'] = np.concatenate(features, axis=1).astype(np.float32)
-        
+                    data['class'] = classification
+
         # 在测试划分中，存储点索引用于投票机制
         if self.split == 'test':
             data['indices'] = indices.copy()  # 存储原始点索引

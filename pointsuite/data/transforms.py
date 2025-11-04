@@ -39,11 +39,11 @@ def index_operator(data_dict, index, duplicate=False):
         data_dict["index_valid_keys"] = [
             "coord",
             "intensity",
-            "is_first",
-            "is_last",
+            "echo",
+            "h_norm",
             "color",
             "normal",
-            "segment",
+            "class",
             "instance",
         ]
     if not duplicate:
@@ -63,15 +63,17 @@ def index_operator(data_dict, index, duplicate=False):
 
 # 收集指定 key 的数据，支持 offset 和特征拼接
 class Collect(object):
-    def __init__(self, keys, offset_keys_dict=None, **kwargs):
+    def __init__(self, keys, offset_key=None, feat_keys=None):
         """
         e.g. Collect(keys=[coord], feat_keys=[coord, color])
         """
-        if offset_keys_dict is None:
-            offset_keys_dict = dict(offset="coord")
+        if offset_key is None:
+            offset_key = dict(offset="coord")
+        if feat_keys is None:
+            feat_keys = dict(feat="coord")
         self.keys = keys
-        self.offset_keys = offset_keys_dict
-        self.kwargs = kwargs
+        self.offset_key = offset_key
+        self.feat_keys = feat_keys
 
     def __call__(self, data_dict):
         data = dict()
@@ -79,9 +81,9 @@ class Collect(object):
             self.keys = [self.keys]
         for key in self.keys:
             data[key] = data_dict[key]
-        for key, value in self.offset_keys.items():
+        for key, value in self.offset_key.items():
             data[key] = torch.tensor([data_dict[value].shape[0]])
-        for name, keys in self.kwargs.items():
+        for name, keys in self.feat_keys.items():
             name = name.replace("_keys", "")
             assert isinstance(keys, Sequence)
             # data[name] = torch.cat([data_dict[key].float() for key in keys], dim=1)
@@ -93,24 +95,6 @@ class Collect(object):
                 tensors.append(tensor)
             data[name] = torch.cat(tensors, dim=1)  # [n, c + m]（m 是额外拼接的 1D 张量数量）
         return data
-    
-
-# 复制指定的键到新的键
-class Copy(object):
-    def __init__(self, keys_dict=None):
-        if keys_dict is None:
-            keys_dict = dict(coord="origin_coord", segment="origin_segment")
-        self.keys_dict = keys_dict
-
-    def __call__(self, data_dict):
-        for key, value in self.keys_dict.items():
-            if isinstance(data_dict[key], np.ndarray):
-                data_dict[value] = data_dict[key].copy()
-            elif isinstance(data_dict[key], torch.Tensor):
-                data_dict[value] = data_dict[key].clone().detach()
-            else:
-                data_dict[value] = copy.deepcopy(data_dict[key])
-        return data_dict
     
 
 # 更新指定的键
@@ -260,7 +244,7 @@ class RandomDropout(object):
             if "sampled_index" in data_dict:
                 # for ScanNet data efficient, we need to make sure labeled point is sampled.
                 idx = np.unique(np.append(idx, data_dict["sampled_index"]))
-                mask = np.zeros_like(data_dict["segment"]).astype(bool)
+                mask = np.zeros_like(data_dict["class"]).astype(bool)
                 mask[data_dict["sampled_index"]] = True
                 data_dict["sampled_index"] = np.where(mask[idx])[0]
             data_dict = index_operator(data_dict, idx)
@@ -427,14 +411,70 @@ class ShufflePoint(object):
 
 
 # ———— 强度变换 ————
-# Intensity 归一化
+# Intensity 自动检测并归一化
+class AutoNormalizeIntensity(object):
+    def __init__(self, target_range=(0, 1)):
+        """
+        自动检测 intensity 位数并归一化到目标范围
+        
+        检测逻辑：
+        - 如果 max <= 1.0: 认为已归一化，不处理
+        - 如果 max <= 255: 认为是 8 位，除以 255
+        - 如果 max <= 65535: 认为是 16 位，除以 65535
+        - 否则: 使用实际的 max-min 范围归一化
+        
+        Args:
+            target_range: 目标范围 (min, max)，默认 (0, 1)
+        """
+        self.target_range = target_range
+
+    def __call__(self, data_dict):
+        if "intensity" in data_dict.keys():
+            intensity = data_dict["intensity"].astype(np.float32)
+            
+            # 检测当前范围
+            i_min = intensity.min()
+            i_max = intensity.max()
+            
+            # 自动检测位数并归一化
+            if i_max <= 1.0:
+                # 已经归一化，可能需要调整范围
+                if self.target_range != (0, 1):
+                    # 从 [0, 1] 映射到 target_range
+                    target_min, target_max = self.target_range
+                    intensity = intensity * (target_max - target_min) + target_min
+            elif i_max <= 255:
+                # 8 位
+                intensity = intensity / 255.0
+                if self.target_range != (0, 1):
+                    target_min, target_max = self.target_range
+                    intensity = intensity * (target_max - target_min) + target_min
+            elif i_max <= 65535:
+                # 16 位
+                intensity = intensity / 65535.0
+                if self.target_range != (0, 1):
+                    target_min, target_max = self.target_range
+                    intensity = intensity * (target_max - target_min) + target_min
+            else:
+                # 未知范围，使用 min-max 归一化
+                if i_max > i_min:
+                    intensity = (intensity - i_min) / (i_max - i_min)
+                    if self.target_range != (0, 1):
+                        target_min, target_max = self.target_range
+                        intensity = intensity * (target_max - target_min) + target_min
+            
+            data_dict["intensity"] = intensity
+        return data_dict
+
+
+# Intensity 归一化（指定位数）
 class NormalizeIntensity(object):
     def __init__(self, max_value=65535.0):
         """
-        Normalize intensity to [0, 1]
+        使用指定的最大值归一化 intensity 到 [0, 1]
         
         Args:
-            max_value: Maximum possible intensity value (e.g., 65535 for 16-bit, 255 for 8-bit)
+            max_value: 最大可能的强度值（如 65535 表示 16 位，255 表示 8 位）
         """
         self.max_value = max_value
 
@@ -653,6 +693,86 @@ class MinMaxNormalizeIntensity(object):
 
     
 # ———— 颜色变换 ————
+# 颜色自动检测并归一化
+class AutoNormalizeColor(object):
+    def __init__(self, target_range=(0, 255)):
+        """
+        自动检测 color 位数并归一化到目标范围
+        
+        检测逻辑：
+        - 如果 max <= 1.0: 认为已归一化到 [0, 1]，映射到 target_range
+        - 如果 max <= 255: 认为是 8 位，已在正确范围
+        - 如果 max <= 65535: 认为是 16 位，转换到 8 位 [0, 255]
+        - 否则: 使用实际的 max-min 范围归一化
+        
+        注意：大部分颜色增强（ChromaticJitter 等）期望 [0, 255] 范围
+        
+        Args:
+            target_range: 目标范围，默认 (0, 255) 用于颜色增强
+        """
+        self.target_range = target_range
+
+    def __call__(self, data_dict):
+        if "color" in data_dict.keys():
+            color = data_dict["color"].astype(np.float32)
+            
+            # 检测当前范围（使用所有通道的最大值）
+            c_min = color.min()
+            c_max = color.max()
+            
+            target_min, target_max = self.target_range
+            
+            # 自动检测位数并归一化
+            if c_max <= 1.0:
+                # 已经归一化到 [0, 1]，映射到 target_range
+                color = color * (target_max - target_min) + target_min
+            elif c_max <= 255:
+                # 8 位，已在 [0, 255] 范围
+                if self.target_range != (0, 255):
+                    # 需要映射到其他范围
+                    color = (color / 255.0) * (target_max - target_min) + target_min
+            elif c_max <= 65535:
+                # 16 位，转换到目标范围
+                color = (color / 65535.0) * (target_max - target_min) + target_min
+            else:
+                # 未知范围，使用 min-max 归一化
+                if c_max > c_min:
+                    color = (color - c_min) / (c_max - c_min)
+                    color = color * (target_max - target_min) + target_min
+            
+            data_dict["color"] = color
+        return data_dict
+
+
+# 颜色归一化（指定位数）
+class NormalizeColor(object):
+    def __init__(self, source_bits=16, target_range=(0, 255)):
+        """
+        使用指定的位数归一化 color
+        
+        Args:
+            source_bits: 源数据位数（8 或 16）
+            target_range: 目标范围，默认 (0, 255)
+        """
+        self.source_bits = source_bits
+        self.target_range = target_range
+        self.source_max = (2 ** source_bits) - 1
+
+    def __call__(self, data_dict):
+        if "color" in data_dict.keys():
+            color = data_dict["color"].astype(np.float32)
+            
+            # 归一化到 [0, 1]
+            color = color / self.source_max
+            
+            # 映射到目标范围
+            target_min, target_max = self.target_range
+            color = color * (target_max - target_min) + target_min
+            
+            data_dict["color"] = color
+        return data_dict
+
+
 # 颜色对比度增强
 class ChromaticAutoContrast(object):
     def __init__(self, p=0.2, blend_factor=None):
@@ -1062,4 +1182,533 @@ class ElasticDistortion(object):
                     data_dict["coord"] = self.elastic_distortion(
                         data_dict["coord"], granularity, magnitude
                     )
+        return data_dict
+
+
+# ———— 归一化高程（h_norm）变换 ————
+# 归一化高程自动归一化（可选裁剪）
+class AutoNormalizeHNorm(object):
+    def __init__(self, clip_range=None):
+        """
+        自动归一化 h_norm（可选裁剪异常值）
+        
+        默认行为（clip_range=None）：
+        - ✅ 不裁剪任何值，保留负值和极大值
+        - ✅ 负值可能代表地下结构（地下室、隧道、坑洞）
+        - ✅ 极大值可能代表真实高层建筑或噪声
+        - ✅ 让模型学习识别和处理异常值，增强鲁棒性
+        
+        可选裁剪（clip_range=(min, max)）：
+        - 如 (0, 50) 将高程限制在 0-50m（排除明显异常值）
+        - 如 (-5, 100) 保留合理的地下和高空范围
+        
+        Args:
+            clip_range: 裁剪范围 (min, max)，默认 None（不裁剪）
+                       None: 不裁剪，保留所有值（推荐）
+                       (min, max): 裁剪到指定范围
+                       (None, max): 只裁剪上界
+                       (min, None): 只裁剪下界
+        """
+        self.clip_range = clip_range
+
+    def __call__(self, data_dict):
+        if "h_norm" in data_dict.keys():
+            h_norm = data_dict["h_norm"].astype(np.float32)
+            
+            # 可选裁剪异常值
+            if self.clip_range is not None:
+                if self.clip_range[0] is not None:
+                    h_norm = np.maximum(h_norm, self.clip_range[0])
+                if self.clip_range[1] is not None:
+                    h_norm = np.minimum(h_norm, self.clip_range[1])
+            
+            data_dict["h_norm"] = h_norm
+        return data_dict
+
+
+# 归一化高程标准化
+class StandardNormalizeHNorm(object):
+    def __init__(self, mean=None, std=None):
+        """
+        标准化 h_norm（Z-score 归一化）
+        
+        适用于需要零均值、单位方差输入的模型
+        
+        Args:
+            mean: 均值，如果为 None 则从数据计算
+            std: 标准差，如果为 None 则从数据计算
+        """
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, data_dict):
+        if "h_norm" in data_dict.keys():
+            h_norm = data_dict["h_norm"].astype(np.float32)
+            
+            mean = self.mean if self.mean is not None else h_norm.mean()
+            std = self.std if self.std is not None else h_norm.std()
+            
+            # 避免除零
+            if std == 0:
+                std = 1.0
+            
+            data_dict["h_norm"] = ((h_norm - mean) / std).astype(np.float32)
+        return data_dict
+
+
+# 归一化高程随机缩放
+class RandomHNormScale(object):
+    def __init__(self, scale=(0.9, 1.1), p=0.5):
+        """
+        随机缩放 h_norm
+        
+        模拟不同的地面识别精度或高程测量误差
+        
+        Args:
+            scale: 缩放范围 (min_scale, max_scale)
+            p: 应用概率
+        """
+        self.scale = scale
+        self.p = p
+
+    def __call__(self, data_dict):
+        if "h_norm" in data_dict.keys() and np.random.rand() < self.p:
+            scale_factor = np.random.uniform(self.scale[0], self.scale[1])
+            data_dict["h_norm"] = (data_dict["h_norm"] * scale_factor).astype(
+                data_dict["h_norm"].dtype
+            )
+        return data_dict
+
+
+# 归一化高程随机噪声
+class RandomHNormNoise(object):
+    def __init__(self, sigma=0.1, p=0.5):
+        """
+        为 h_norm 添加随机高斯噪声
+        
+        模拟地面高程估计的局部误差
+        
+        Args:
+            sigma: 高斯噪声的标准差（单位与 h_norm 相同，通常是米）
+            p: 应用概率
+        """
+        self.sigma = sigma
+        self.p = p
+
+    def __call__(self, data_dict):
+        if "h_norm" in data_dict.keys() and np.random.rand() < self.p:
+            noise = np.random.normal(0, self.sigma, data_dict["h_norm"].shape)
+            data_dict["h_norm"] = (data_dict["h_norm"] + noise).astype(
+                data_dict["h_norm"].dtype
+            )
+        return data_dict
+
+
+# 归一化高程对数变换
+class LogTransformHNorm(object):
+    def __init__(self, epsilon=1e-6):
+        """
+        对 h_norm 进行对数变换
+        
+        用于处理高度范围很大的场景（如建筑物和地面）
+        使模型对不同高度尺度更敏感
+        
+        Args:
+            epsilon: 避免 log(0) 的小常数
+        """
+        self.epsilon = epsilon
+
+    def __call__(self, data_dict):
+        if "h_norm" in data_dict.keys():
+            h_norm = data_dict["h_norm"].astype(np.float32)
+            # 确保非负
+            h_norm = np.maximum(h_norm, 0)
+            # 对数变换
+            data_dict["h_norm"] = np.log(h_norm + self.epsilon).astype(np.float32)
+        return data_dict
+
+
+# 归一化高程分桶编码
+class BinHNorm(object):
+    def __init__(self, bins=10, range=(0, 20)):
+        """
+        将 h_norm 离散化为桶（bins）
+        
+        将连续的高度值转换为离散的高度等级
+        
+        Args:
+            bins: 桶的数量
+            range: 高度范围 (min, max)
+        """
+        self.bins = bins
+        self.range = range
+
+    def __call__(self, data_dict):
+        if "h_norm" in data_dict.keys():
+            h_norm = data_dict["h_norm"].astype(np.float32)
+            
+            # 使用 numpy 的 digitize 进行分桶
+            bin_edges = np.linspace(self.range[0], self.range[1], self.bins + 1)
+            binned = np.digitize(h_norm, bin_edges) - 1
+            
+            # 裁剪到 [0, bins-1]
+            binned = np.clip(binned, 0, self.bins - 1)
+            
+            # 转换为 float（归一化到 [0, 1]）
+            data_dict["h_norm"] = (binned / (self.bins - 1)).astype(np.float32)
+        return data_dict
+
+
+# ———— 噪点注入增强 ————
+# 添加极端高度噪点
+class AddExtremeOutliers(object):
+    def __init__(self, 
+                 num_outliers=None, 
+                 ratio=0.01,
+                 height_range=(-10, 100),
+                 height_mode='uniform',
+                 intensity_range=(0, 1),
+                 color_value=(128, 128, 128),
+                 class_label=None,
+                 p=0.5):
+        """
+        添加极端高度噪点（模拟大气噪声、多路径反射等）
+        
+        噪点来源模拟：
+        - 🌩️ 大气噪声：飞鸟、云、灰尘（高空噪点）
+        - 🔻 地面反射：水面、玻璃反射（低空/地下噪点）
+        - 📡 多路径反射：建筑物、金属表面反射（随机高度）
+        - 🌳 植被遮挡：树叶间隙的伪点（中等高度）
+        
+        噪点属性设置策略：
+        - coord: 在现有点云的 XY 范围内随机分布，Z 为极端值
+        - intensity: 通常较弱（大气噪声）或很强（反射）
+        - color: 灰色（未知）或随机色
+        - h_norm: 根据 Z 和地面高程计算（或设为极端值）
+        - class: 噪声类别（可配置，如 0=未分类）
+        
+        Args:
+            num_outliers: 固定噪点数量，如果指定则忽略 ratio
+            ratio: 噪点数量占总点数的比例，默认 0.01（1%）
+            height_range: 噪点高度范围 (z_min, z_max)，默认 (-10, 100) 米
+                         相对于原始 Z 坐标，不是 h_norm
+            height_mode: 高度分布模式
+                - 'uniform': 均匀分布在 height_range
+                - 'bimodal': 双峰分布（高空+低空）
+                - 'high': 只在高空（模拟飞鸟、云）
+                - 'low': 只在低空/地下（模拟反射）
+            intensity_range: 噪点强度范围 (min, max)，默认 (0, 1)
+            color_value: 噪点颜色
+                - tuple (R, G, B): 固定颜色，如 (128, 128, 128) 灰色
+                - 'random': 随机颜色
+                - 'inherit': 从最近的真实点继承颜色
+            class_label: 噪点的分类标签
+                - None: 从最近的真实点继承
+                - int: 固定标签（如 0=未分类, -1=噪声）
+                - 'ignore': 使用 ignore_label（通常是 -1）
+            p: 应用概率
+        """
+        self.num_outliers = num_outliers
+        self.ratio = ratio
+        self.height_range = height_range
+        self.height_mode = height_mode
+        self.intensity_range = intensity_range
+        self.color_value = color_value
+        self.class_label = class_label
+        self.p = p
+
+    def __call__(self, data_dict):
+        if np.random.rand() > self.p:
+            return data_dict
+        
+        if "coord" not in data_dict:
+            return data_dict
+        
+        coord = data_dict["coord"]
+        n_points = len(coord)
+        
+        # 计算噪点数量
+        if self.num_outliers is not None:
+            n_outliers = self.num_outliers
+        else:
+            n_outliers = max(1, int(n_points * self.ratio))
+        
+        # 获取原始点云的 XY 范围
+        x_min, y_min, z_min = coord.min(axis=0)
+        x_max, y_max, z_max = coord.max(axis=0)
+        
+        # 生成噪点坐标
+        outlier_xy = np.random.rand(n_outliers, 2)
+        outlier_xy[:, 0] = outlier_xy[:, 0] * (x_max - x_min) + x_min
+        outlier_xy[:, 1] = outlier_xy[:, 1] * (y_max - y_min) + y_min
+        
+        # 根据模式生成高度
+        if self.height_mode == 'uniform':
+            # 均匀分布
+            outlier_z = np.random.uniform(
+                self.height_range[0], self.height_range[1], n_outliers
+            )
+        elif self.height_mode == 'bimodal':
+            # 双峰分布：50% 高空，50% 低空
+            n_high = n_outliers // 2
+            n_low = n_outliers - n_high
+            z_high = np.random.uniform(
+                max(self.height_range[0], z_max), self.height_range[1], n_high
+            )
+            z_low = np.random.uniform(
+                self.height_range[0], min(self.height_range[1], z_min), n_low
+            )
+            outlier_z = np.concatenate([z_high, z_low])
+            np.random.shuffle(outlier_z)
+        elif self.height_mode == 'high':
+            # 只在高空
+            outlier_z = np.random.uniform(
+                max(self.height_range[0], z_max), self.height_range[1], n_outliers
+            )
+        elif self.height_mode == 'low':
+            # 只在低空/地下
+            outlier_z = np.random.uniform(
+                self.height_range[0], min(self.height_range[1], z_min), n_outliers
+            )
+        else:
+            raise ValueError(f"Unknown height_mode: {self.height_mode}")
+        
+        # 组合噪点坐标
+        outlier_coord = np.column_stack([outlier_xy, outlier_z]).astype(coord.dtype)
+        
+        # 添加噪点到坐标
+        data_dict["coord"] = np.vstack([coord, outlier_coord])
+        
+        # 处理其他属性
+        # 1. Intensity
+        if "intensity" in data_dict:
+            outlier_intensity = np.random.uniform(
+                self.intensity_range[0], self.intensity_range[1], n_outliers
+            ).astype(data_dict["intensity"].dtype)
+            data_dict["intensity"] = np.concatenate([
+                data_dict["intensity"], outlier_intensity
+            ])
+        
+        # 2. Color
+        if "color" in data_dict:
+            if self.color_value == 'random':
+                # 随机颜色
+                outlier_color = np.random.uniform(
+                    0, 255, (n_outliers, 3)
+                ).astype(data_dict["color"].dtype)
+            elif self.color_value == 'inherit':
+                # 从最近的真实点继承（使用简单的随机采样）
+                random_indices = np.random.choice(n_points, n_outliers)
+                outlier_color = data_dict["color"][random_indices].copy()
+            else:
+                # 固定颜色
+                outlier_color = np.tile(
+                    np.array(self.color_value, dtype=data_dict["color"].dtype),
+                    (n_outliers, 1)
+                )
+            data_dict["color"] = np.vstack([data_dict["color"], outlier_color])
+        
+        # 3. h_norm
+        if "h_norm" in data_dict:
+            # 计算噪点的 h_norm
+            # 简化：假设地面高程为原始点云的最小 Z
+            ground_z = z_min
+            outlier_h_norm = (outlier_z - ground_z).astype(data_dict["h_norm"].dtype)
+            data_dict["h_norm"] = np.concatenate([
+                data_dict["h_norm"], outlier_h_norm
+            ])
+        
+        # 4. Normal
+        if "normal" in data_dict:
+            # 噪点的法向量：随机方向（模拟噪声）
+            outlier_normal = np.random.randn(n_outliers, 3).astype(
+                data_dict["normal"].dtype
+            )
+            # 归一化
+            norms = np.linalg.norm(outlier_normal, axis=1, keepdims=True)
+            outlier_normal = outlier_normal / (norms + 1e-8)
+            data_dict["normal"] = np.vstack([data_dict["normal"], outlier_normal])
+        
+        # 5. Echo
+        if "echo" in data_dict:
+            # 噪点通常是单次回波
+            outlier_echo = np.ones((n_outliers, 2), dtype=data_dict["echo"].dtype)
+            # 设为首次且末次回波（单次回波的特征）
+            data_dict["echo"] = np.vstack([data_dict["echo"], outlier_echo])
+        
+        # 6. Classification
+        if "class" in data_dict:
+            if self.class_label is None:
+                # 从最近的真实点继承（随机采样）
+                random_indices = np.random.choice(n_points, n_outliers)
+                outlier_class = data_dict["class"][random_indices].copy()
+            elif self.class_label == 'ignore':
+                # 使用 ignore_label（通常在 dataset 中定义）
+                outlier_class = np.full(n_outliers, -1, dtype=data_dict["class"].dtype)
+            else:
+                # 固定标签
+                outlier_class = np.full(
+                    n_outliers, self.class_label, dtype=data_dict["class"].dtype
+                )
+            data_dict["class"] = np.concatenate([data_dict["class"], outlier_class])
+        
+        return data_dict
+
+
+# 添加局部噪点簇
+class AddLocalNoiseClusters(object):
+    def __init__(self,
+                 num_clusters=3,
+                 points_per_cluster=(5, 20),
+                 cluster_radius=2.0,
+                 height_offset=(-5, 5),
+                 intensity_range=(0, 1),
+                 color_value='random',
+                 class_label='ignore',
+                 p=0.3):
+        """
+        添加局部噪点簇（模拟局部测量误差、多路径反射等）
+        
+        与 AddExtremeOutliers 的区别：
+        - AddExtremeOutliers: 全局随机分布的极端噪点
+        - AddLocalNoiseClusters: 局部聚集的噪点簇（更真实）
+        
+        应用场景：
+        - 🏢 建筑物玻璃反射：产生局部聚集的假点
+        - 🌲 植被遮挡：树叶间隙产生的噪点簇
+        - 📡 多路径干扰：特定位置的系统误差
+        - 💧 水面反射：水体附近的噪点
+        
+        Args:
+            num_clusters: 噪点簇的数量
+            points_per_cluster: 每个簇的点数范围 (min, max)
+            cluster_radius: 簇的半径（米）
+            height_offset: 噪点相对于簇中心的高度偏移范围 (min, max)
+            intensity_range: 噪点强度范围
+            color_value: 噪点颜色（'random', 'inherit', 或 RGB tuple）
+            class_label: 噪点分类标签（None, int, 'ignore'）
+            p: 应用概率
+        """
+        self.num_clusters = num_clusters
+        self.points_per_cluster = points_per_cluster
+        self.cluster_radius = cluster_radius
+        self.height_offset = height_offset
+        self.intensity_range = intensity_range
+        self.color_value = color_value
+        self.class_label = class_label
+        self.p = p
+
+    def __call__(self, data_dict):
+        if np.random.rand() > self.p:
+            return data_dict
+        
+        if "coord" not in data_dict:
+            return data_dict
+        
+        coord = data_dict["coord"]
+        n_points = len(coord)
+        
+        if n_points < 10:
+            return data_dict
+        
+        # 随机选择簇中心（从现有点中选择）
+        cluster_centers = coord[
+            np.random.choice(n_points, min(self.num_clusters, n_points), replace=False)
+        ]
+        
+        all_outlier_coords = []
+        
+        for center in cluster_centers:
+            # 每个簇的点数
+            n_cluster = np.random.randint(
+                self.points_per_cluster[0], self.points_per_cluster[1] + 1
+            )
+            
+            # 在球形区域内生成点
+            # 使用球坐标系：均匀分布
+            theta = np.random.uniform(0, 2 * np.pi, n_cluster)
+            phi = np.random.uniform(0, np.pi, n_cluster)
+            r = np.random.uniform(0, self.cluster_radius, n_cluster)
+            
+            # 转换为笛卡尔坐标
+            x = center[0] + r * np.sin(phi) * np.cos(theta)
+            y = center[1] + r * np.sin(phi) * np.sin(theta)
+            z_base = center[2] + r * np.cos(phi)
+            
+            # 添加高度偏移
+            z_offset = np.random.uniform(
+                self.height_offset[0], self.height_offset[1], n_cluster
+            )
+            z = z_base + z_offset
+            
+            cluster_coords = np.column_stack([x, y, z])
+            all_outlier_coords.append(cluster_coords)
+        
+        if len(all_outlier_coords) == 0:
+            return data_dict
+        
+        outlier_coord = np.vstack(all_outlier_coords).astype(coord.dtype)
+        n_outliers = len(outlier_coord)
+        
+        # 添加噪点到坐标
+        data_dict["coord"] = np.vstack([coord, outlier_coord])
+        
+        # 处理其他属性（与 AddExtremeOutliers 类似）
+        if "intensity" in data_dict:
+            outlier_intensity = np.random.uniform(
+                self.intensity_range[0], self.intensity_range[1], n_outliers
+            ).astype(data_dict["intensity"].dtype)
+            data_dict["intensity"] = np.concatenate([
+                data_dict["intensity"], outlier_intensity
+            ])
+        
+        if "color" in data_dict:
+            if self.color_value == 'random':
+                outlier_color = np.random.uniform(
+                    0, 255, (n_outliers, 3)
+                ).astype(data_dict["color"].dtype)
+            elif self.color_value == 'inherit':
+                random_indices = np.random.choice(n_points, n_outliers)
+                outlier_color = data_dict["color"][random_indices].copy()
+            else:
+                outlier_color = np.tile(
+                    np.array(self.color_value, dtype=data_dict["color"].dtype),
+                    (n_outliers, 1)
+                )
+            data_dict["color"] = np.vstack([data_dict["color"], outlier_color])
+        
+        if "h_norm" in data_dict:
+            # 简化计算：使用原始点云最小 Z 作为地面
+            ground_z = coord[:, 2].min()
+            outlier_h_norm = (outlier_coord[:, 2] - ground_z).astype(
+                data_dict["h_norm"].dtype
+            )
+            data_dict["h_norm"] = np.concatenate([
+                data_dict["h_norm"], outlier_h_norm
+            ])
+        
+        if "normal" in data_dict:
+            outlier_normal = np.random.randn(n_outliers, 3).astype(
+                data_dict["normal"].dtype
+            )
+            norms = np.linalg.norm(outlier_normal, axis=1, keepdims=True)
+            outlier_normal = outlier_normal / (norms + 1e-8)
+            data_dict["normal"] = np.vstack([data_dict["normal"], outlier_normal])
+        
+        if "echo" in data_dict:
+            outlier_echo = np.ones((n_outliers, 2), dtype=data_dict["echo"].dtype)
+            data_dict["echo"] = np.vstack([data_dict["echo"], outlier_echo])
+        
+        if "class" in data_dict:
+            if self.class_label is None:
+                random_indices = np.random.choice(n_points, n_outliers)
+                outlier_class = data_dict["class"][random_indices].copy()
+            elif self.class_label == 'ignore':
+                outlier_class = np.full(n_outliers, -1, dtype=data_dict["class"].dtype)
+            else:
+                outlier_class = np.full(
+                    n_outliers, self.class_label, dtype=data_dict["class"].dtype
+                )
+            data_dict["class"] = np.concatenate([data_dict["class"], outlier_class])
+        
         return data_dict

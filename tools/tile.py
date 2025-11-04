@@ -253,7 +253,8 @@ class LASProcessorToBinWithGridSample:
                  overlap: bool = False,
                  grid_size: Optional[float] = None,
                  max_loops: int = 30,
-                 shuffle_points: bool = True):
+                 shuffle_points: bool = True,
+                 ground_class: Optional[int] = 2):
         """
         Initialize LAS point cloud processor with grid sampling.
         
@@ -267,6 +268,7 @@ class LASProcessorToBinWithGridSample:
             grid_size: Grid size for grid sampling (None to skip grid sampling)
             max_loops: Maximum number of sampling iterations for grid sampling
             shuffle_points: Whether to shuffle points within each voxel for randomness
+            ground_class: Classification value for ground points (default: 2, None to skip is_ground generation)
         """
         self.input_path = Path(input_path)
         self.output_dir = Path(output_dir) if output_dir else self.input_path.parent
@@ -277,6 +279,7 @@ class LASProcessorToBinWithGridSample:
         self.grid_size = grid_size
         self.max_loops = max_loops
         self.shuffle_points = shuffle_points
+        self.ground_class = ground_class
         
         # Initialize grid sampler if grid_size is specified
         self.grid_sampler = GridSampler(grid_size, max_loops, shuffle_points) if grid_size is not None else None
@@ -326,6 +329,10 @@ class LASProcessorToBinWithGridSample:
         else:
             print(f"Grid sampling: ❌ Disabled")
         print(f"Overlap mode: {'✅ Enabled' if self.overlap else '❌ Disabled'}")
+        if self.ground_class is not None:
+            print(f"Ground classification: {self.ground_class} → is_ground field")
+        else:
+            print(f"Ground classification: ❌ Disabled")
         print(f"Parallel workers: {n_workers} (per file)")
         print("-"*70)
         
@@ -694,6 +701,13 @@ class LASProcessorToBinWithGridSample:
             data_dict['classification'] = np.zeros(len(las_data.points), dtype=np.uint8)
             dtype_list.append(('classification', np.uint8))
         
+        # 生成 is_ground 字段（基于 classification）
+        if self.ground_class is not None and has_classification:
+            is_ground = (las_data.classification == self.ground_class).astype(np.uint8)
+            fields_to_save.append('is_ground')
+            data_dict['is_ground'] = is_ground
+            dtype_list.append(('is_ground', np.uint8))
+        
         # 创建结构化数组
         structured_array = np.zeros(len(las_data.points), dtype=dtype_list)
         for field in fields_to_save:
@@ -846,7 +860,7 @@ def process_las_files_to_bin_with_gridsample(input_path, output_dir=None, window
                                               min_points=None, max_points=None,
                                               overlap=False, grid_size=None,
                                               max_loops=30, shuffle_points=True,
-                                              n_workers=None):
+                                              ground_class=2, n_workers=None):
     """
     Process LAS files with grid sampling and save to bin+pkl format.
     并行处理在单个LAS文件内部进行（处理segments），而不是跨文件并行。
@@ -861,6 +875,7 @@ def process_las_files_to_bin_with_gridsample(input_path, output_dir=None, window
         grid_size: Grid size for grid sampling (None to skip grid sampling)
         max_loops: Maximum number of sampling iterations (to avoid extreme cases)
         shuffle_points: Whether to shuffle points within each voxel for randomness
+        ground_class: Classification value for ground points (default: 2, None to skip is_ground generation)
         n_workers: Number of parallel workers for segment processing (None = auto, uses CPU count - 1)
     """
     processor = LASProcessorToBinWithGridSample(
@@ -872,7 +887,8 @@ def process_las_files_to_bin_with_gridsample(input_path, output_dir=None, window
         overlap=overlap,
         grid_size=grid_size,
         max_loops=max_loops,
-        shuffle_points=shuffle_points
+        shuffle_points=shuffle_points,
+        ground_class=ground_class
     )
     processor.process_all_files(n_workers=n_workers)
 
@@ -933,8 +949,8 @@ def load_all_segments_info(pkl_path: Union[str, Path]) -> List[Dict[str, Any]]:
 
 if __name__ == "__main__":
     # 示例：处理LAS文件（带Grid Sampling）
-    input_path = r"E:\data\Dales\dales_las\train"
-    output_dir = r"E:\data\Dales\dales_las\bin\train"
+    input_path = r"E:\data\Dales\dales_las\test"
+    output_dir = r"E:\data\Dales\dales_las\bin\test"
     window_size = (50.0, 50.0)
     min_points = 4096 * 5
     max_points = 4096 * 20
@@ -942,6 +958,7 @@ if __name__ == "__main__":
     grid_size = None  # 🔥 设置grid size启用grid sampling
     max_loops = 10  # 🔥 最大采样循环次数（避免极端情况）
     shuffle_points = True  # 🔥 打乱体素内点顺序（提高随机性）
+    ground_class = 1  # 🔥 地面点的classification值（None则不生成is_ground字段）
     max_workers = None  # 自动检测CPU核心数
     
     # 处理文件（并行处理在单个LAS文件内部进行）
@@ -955,6 +972,7 @@ if __name__ == "__main__":
         grid_size=grid_size,  # 🔥 设置grid_size启用grid sampling（None则跳过）
         max_loops=max_loops,  # 🔥 最大循环次数（当体素内点>max_loops时，每次采样多个点）
         shuffle_points=shuffle_points,  # 🔥 是否打乱体素内点顺序
+        ground_class=ground_class,  # 🔥 地面点classification值（2是LAS标准，None则不生成is_ground）
         n_workers=max_workers  # 🔥 并行worker数（None=自动，每个文件内部并行处理segments）
     )
     
