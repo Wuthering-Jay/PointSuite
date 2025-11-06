@@ -80,8 +80,10 @@ class Collect(object):
         if isinstance(self.keys, str):
             self.keys = [self.keys]
         for key in self.keys:
+            # 直接传递数据（可能是 numpy 或 tensor）
             data[key] = data_dict[key]
         for key, value in self.offset_key.items():
+            # offset 创建为 Tensor
             data[key] = torch.tensor([data_dict[value].shape[0]])
         for name, keys in self.feat_keys.items():
             name = name.replace("_keys", "")
@@ -89,7 +91,12 @@ class Collect(object):
             # data[name] = torch.cat([data_dict[key].float() for key in keys], dim=1)
             tensors = []
             for key in keys:
-                tensor = data_dict[key].float()
+                # 先转换为 Tensor（如果还不是）
+                if isinstance(data_dict[key], np.ndarray):
+                    tensor = torch.from_numpy(data_dict[key]).float()
+                else:
+                    tensor = data_dict[key].float()
+                
                 if tensor.dim() == 1:  # 如果是 [n]，扩展成 [n, 1]
                     tensor = tensor.unsqueeze(1)
                 tensors.append(tensor)
@@ -230,12 +237,12 @@ class RandomShift(object):
 
 # 随机丢弃
 class RandomDropout(object):
-    def __init__(self, dropout_ratio=0.2, dropout_application_ratio=0.5):
+    def __init__(self, dropout_ratio=0.2, p=0.5):
         """
         upright_axis: axis index among x,y,z, i.e. 2 for z
         """
         self.dropout_ratio = dropout_ratio
-        self.dropout_application_ratio = dropout_application_ratio
+        self.dropout_application_ratio = p
 
     def __call__(self, data_dict):
         if random.random() < self.dropout_application_ratio:

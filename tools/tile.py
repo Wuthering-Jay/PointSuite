@@ -714,7 +714,7 @@ class LASProcessorToBinWithGridSample:
             structured_array[field] = data_dict[field]
         
         t1 = time.time()
-        print(f"     - 收集字段: {t1-t0:.3f}s ({len(fields_to_save)} 字段)")
+        print(f"     - 收集字段: {t1-t0:.3f}s ({len(fields_to_save)} 个字段： {fields_to_save})")
         
         # 2. 保存为bin文件
         t0 = time.time()

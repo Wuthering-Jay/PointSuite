@@ -79,6 +79,30 @@ def create_las_from_segment(segment_data: np.ndarray,
     if 'nir' in field_names:
         las.nir = segment_data['nir']
     
+    # 额外字段（通过extra_bytes写入）
+    extra_fields_to_add = []
+    
+    # is_ground 字段
+    if 'is_ground' in field_names:
+        extra_fields_to_add.append(('is_ground', segment_data['is_ground'], np.uint8))
+    
+    # 如果有额外字段，添加到LAS文件
+    if extra_fields_to_add:
+        # 为每个额外字段创建ExtraBytesParams
+        for field_name, field_data, field_dtype in extra_fields_to_add:
+            try:
+                # 创建extra bytes定义
+                extra_bytes = laspy.ExtraBytesParams(
+                    name=field_name,
+                    type=field_dtype
+                )
+                # 添加到header
+                las.add_extra_dim(extra_bytes)
+                # 设置数据
+                setattr(las, field_name, field_data)
+            except Exception as e:
+                print(f"  ⚠️ 警告: 无法添加字段 {field_name}: {e}")
+    
     # 保存LAS文件
     las.write(output_path)
 
@@ -253,9 +277,9 @@ if __name__ == "__main__":
     # ==================== 使用示例 ====================
     
     # 示例1: 提取单个bin文件的所有segments（限制数量避免生成过多文件）
-    bin_file = r"E:\data\云南遥感中心\第一批\bin\train_with_gridsample\processed_02.bin"
-    pkl_file = r"E:\data\云南遥感中心\第一批\bin\train_with_gridsample\processed_02.pkl"
-    output_dir = r"E:\data\云南遥感中心\第一批\las_tiles\processed_02"
+    bin_file = r"E:\data\Dales\dales_las\bin\train\5080_54435.bin"
+    pkl_file = r"E:\data\Dales\dales_las\bin\train\5080_54435.pkl"
+    output_dir = r"E:\data\Dales\dales_las\bin\train\5080_54435_output"
     
     if Path(bin_file).exists() and Path(pkl_file).exists():
         # 只提取前20个segment作为示例

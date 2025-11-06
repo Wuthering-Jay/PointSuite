@@ -377,7 +377,7 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         else:
             print(f"批次大小: {self.batch_size}")
         print(f"工作进程数: {self.num_workers}")
-        print(f"合并函数: {type(self.collate_fn).__name__}")
+        print(f"合并函数: {self.collate_fn.__name__ if hasattr(self.collate_fn, '__name__') else type(self.collate_fn).__name__}")
         print("-" * 60)
         
         for split in ['train', 'val', 'test']:

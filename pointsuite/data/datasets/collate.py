@@ -15,10 +15,18 @@ def collate_fn(batch):
     基础 collate function for point cloud which support dict and list
     
     该函数将多个不同点数的样本合并成一个batch：
-    - 点云数据会被拼接成一个大的点云
-    - coord 和 feature 会被拼接
-    - 自动添加 'offset' 字段，记录每个样本的起始位置
+    - 点云数据（coord, feat 等）会被拼接成一个大的点云
+    - 分类标签（class）保持为列表（每个样本一个 tensor）
+    - 自动添加 'offset' 字段，格式为 [n1, n1+n2, ...]（不包含起始0），长度为 batch_size
     - test模式下会拼接 indices 用于投票机制
+    
+    统一的输出格式：
+    - coord: [total_points, 3] - 拼接所有点
+    - feat: [total_points, C] - 拼接所有特征
+    - class: [total_points] - 拼接所有点的标签（点级标签）
+    - offset: [batch_size] - 累积偏移（不包含起始0），格式为 [n1, n1+n2, ...]
+    
+    注意：如果需要样本级标签（如整个场景的分类），请使用不同的键名（如 'scene_label'）
     """
     if not isinstance(batch, Sequence):
         raise TypeError(f"{type(batch)} is not supported.")
@@ -34,29 +42,45 @@ def collate_fn(batch):
         # 计算每个样本的点数（用于offset）
         num_points_per_sample = []
         
+        # 需要拼接的字段（点级数据）
+        concat_keys = ['coord', 'feat', 'feature', 'indices', 'normal', 'class', 'label', 'classification']
+        
+        # 需要保持为列表的字段（样本级数据）
+        # 注意：如果有真正的样本级标签（如整个场景的分类），应该使用不同的键名（如 'scene_label'）
+        list_keys = []
+        
         for key in keys:
             # 收集所有样本的该字段
             values = [torch.from_numpy(d[key]) if isinstance(d[key], np.ndarray) else d[key] for d in batch]
             
-            # 对于点云数据，拼接而不是stack
-            if key in ['coord', 'feature', 'classification', 'indices']:
-                # 拼接成一个大的tensor
+            # 跳过 offset（如果样本中已有，会被覆盖）
+            if key == 'offset':
+                continue
+            
+            # 拼接点级数据
+            if key in concat_keys:
                 result[key] = torch.cat(values, dim=0)
                 
-                # 记录点数（从coord或feature获取）
-                if key == 'coord' and len(num_points_per_sample) == 0:
+                # 记录点数（从 coord 优先，否则从任何拼接字段获取）
+                if len(num_points_per_sample) == 0:
                     num_points_per_sample = [v.shape[0] for v in values]
+            
+            # 保持样本级数据为列表
+            elif key in list_keys:
+                result[key] = values  # 保持为列表
+            
+            # 其他字段尝试 stack，失败则保持为列表
             else:
-                # 其他字段使用默认处理
                 try:
                     result[key] = torch.stack(values, dim=0)
                 except:
                     result[key] = values
         
-        # 添加 offset 字段
+        # 添加 offset 字段（格式：[n1, n1+n2, ...]，长度为 batch_size）
         if len(num_points_per_sample) > 0:
-            offset = torch.cumsum(torch.tensor([0] + num_points_per_sample), dim=0).int()
-            result['offset'] = offset[1:]  # 去掉第一个0，只保留累积和
+            # 生成累积和，但不包含起始 0：offset[i] 表示前 i+1 个样本的累计点数
+            offset = torch.cumsum(torch.tensor(num_points_per_sample), dim=0).int()
+            result['offset'] = offset  # 不包含起始 0，长度为 batch_size
         
         return result
     
@@ -67,8 +91,10 @@ def collate_fn(batch):
         return list(batch)
     elif isinstance(batch[0], Sequence):
         for data in batch:
+            # data[0] 是点级字段（如 coord），append 每个样本的点数
             data.append(torch.tensor([data[0].shape[0]]))
         batch = [collate_fn(samples) for samples in zip(*batch)]
+        # 此处 batch[-1] 包含每个样本的点数，直接取累积和（不添加起始0）
         batch[-1] = torch.cumsum(batch[-1], dim=0).int()
         return batch
     else:

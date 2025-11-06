@@ -50,7 +50,7 @@ class DatasetBase(Dataset, ABC):
             transform: 要应用的数据变换
             ignore_label: 在训练/评估中忽略的标签
             loop: 遍历数据集的次数（用于训练增强）
-            cache_data: 是否在内存中缓存加载的数据
+            cache_data: 是否在内存中缓存加载的数据，数据集较小时适用
             class_mapping: 将原始类别标签映射到连续标签的字典
                           示例：{0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
                           如果为 None，则不应用映射
@@ -92,7 +92,7 @@ class DatasetBase(Dataset, ABC):
         print(f"==> {self.__class__.__name__} ({self.split}) 已初始化:")
         print(f"    - 数据根目录: {self.data_root}")
         print(f"    - 总样本数: {len(self.data_list)}")
-        print(f"    - 资产: {self.assets}")
+        print(f"    - 属性: {self.assets}")
         print(f"    - 循环: {self.loop}")
         print(f"    - 缓存: {'已启用' if self.cache_data else '已禁用'}")
     

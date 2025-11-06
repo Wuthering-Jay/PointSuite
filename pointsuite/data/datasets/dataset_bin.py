@@ -39,6 +39,7 @@ class BinPklDataset(DatasetBase):
         loop=1,
         cache_data=False,
         class_mapping=None,
+        h_norm_grid=1.0
     ):
         """
         初始化 BinPklDataset
@@ -61,18 +62,17 @@ class BinPklDataset(DatasetBase):
             class_mapping: 将原始类别标签映射到连续标签的字典
                           示例：{0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
                           如果为 None，则不应用映射
+            h_norm_grid: 计算归一化高程时使用的栅格分辨率（米）
         """
         # 如果未指定，则设置默认资产
         if assets is None:
             assets = ['coord', 'intensity', 'classification']
         
-        # 存储类别映射
-        self.class_mapping = class_mapping
-        
         # 初始化元数据缓存（显著加快数据加载速度）
         self._metadata_cache = {}
+        self.h_norm_grid = h_norm_grid
         
-        # 调用父类初始化
+        # 调用父类初始化（传递 class_mapping 参数）
         super().__init__(
             data_root=data_root,
             split=split,
@@ -80,7 +80,8 @@ class BinPklDataset(DatasetBase):
             transform=transform,
             ignore_label=ignore_label,
             loop=loop,
-            cache_data=cache_data
+            cache_data=cache_data,
+            class_mapping=class_mapping  # 重要：传递 class_mapping 给父类
         )
     
     def _load_data_list(self) -> List[Dict[str, Any]]:
@@ -441,7 +442,7 @@ class BinPklDataset(DatasetBase):
                     h_norm = segment_points['h_norm'].astype(np.float32)
                 # 否则，基于 is_ground 字段动态计算
                 elif 'is_ground' in segment_points.dtype.names:
-                    h_norm = self._compute_h_norm(coord, segment_points['is_ground'])
+                    h_norm = self._compute_h_norm(coord, segment_points['is_ground'], self.h_norm_grid)
                 else:
                     raise ValueError("既没有 'h_norm' 也没有 'is_ground' 字段，无法计算归一化高程")
                 data['h_norm'] = h_norm
@@ -452,10 +453,17 @@ class BinPklDataset(DatasetBase):
                 
                 # 如果提供了类别映射则应用
                 if self.class_mapping is not None:
-                    # 创建副本以避免修改原始数据
+                    # 使用向量化方式映射类别
+                    # 创建一个初始值为原始标签的数组
                     mapped_classification = classification.copy()
+                    
+                    # 对映射表中的每个 (原始标签 -> 新标签) 对应用映射
                     for original_label, new_label in self.class_mapping.items():
-                        mapped_classification[classification == original_label] = new_label
+                        # 找到所有原始标签等于 original_label的位置
+                        mask = (classification == original_label)
+                        # 将这些位置的值设置为 new_label
+                        mapped_classification[mask] = new_label
+                    
                     data['class'] = mapped_classification
                 else:
                     data['class'] = classification

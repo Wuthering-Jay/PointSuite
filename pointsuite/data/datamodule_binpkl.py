@@ -65,6 +65,7 @@ class BinPklDataModule(DataModuleBase):
         loop: int = 1,
         cache_data: bool = False,
         class_mapping: Optional[Dict[int, int]] = None,
+        h_norm_grid: Optional[float] = 1.0,
         use_dynamic_batch: bool = False,
         max_points: int = 500000,
         train_sampler_weights: Optional[List[float]] = None,
@@ -93,6 +94,7 @@ class BinPklDataModule(DataModuleBase):
             cache_data: 是否在内存中缓存加载的数据
             class_mapping: 将原始类别标签映射到连续标签的字典
                           示例：{0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
+            h_norm_grid: 计算归一化高程时使用的栅格分辨率（米）
             use_dynamic_batch: 是否使用 DynamicBatchSampler（推荐用于内存控制）
                               如果为 True，batch_size 参数将被忽略
             max_points: 每个批次的最大点数（仅在 use_dynamic_batch=True 时使用）
@@ -110,6 +112,7 @@ class BinPklDataModule(DataModuleBase):
         self.loop = loop
         self.cache_data = cache_data
         self.class_mapping = class_mapping
+        self.h_norm_grid = h_norm_grid
         
         # Call parent constructor
         super().__init__(
@@ -152,6 +155,7 @@ class BinPklDataModule(DataModuleBase):
             loop=self.loop if split == 'train' else 1,  # 仅对训练进行循环
             cache_data=self.cache_data,
             class_mapping=self.class_mapping,
+            h_norm_grid=self.h_norm_grid,
             **self.kwargs
         )
     
@@ -196,7 +200,7 @@ class BinPklDataModule(DataModuleBase):
         else:
             print(f"批次大小: {self.batch_size}")
         print(f"工作进程数: {self.num_workers}")
-        print(f"合并函数: {type(self.collate_fn).__name__}")
+        print(f"合并函数: {self.collate_fn.__name__ if hasattr(self.collate_fn, '__name__') else type(self.collate_fn).__name__}")
         print("-" * 60)
         
         for split in ['train', 'val', 'test']:
