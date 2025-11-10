@@ -819,6 +819,10 @@ class LASProcessorToBinWithGridSample:
                 'segment_id': i,
                 'indices': segment_indices,  # 在bin文件中的索引
                 'num_points': len(segment_indices),
+                # 🔥 新增：添加所属文件信息，用于 predict 时直接获取
+                'bin_file': base_name,  # bin 文件名（不带扩展名）
+                'bin_path': str(bin_path),  # 完整 bin 路径
+                'pkl_path': str(pkl_path),  # 完整 pkl 路径
             }
             
             # 统计该分块中的类别信息

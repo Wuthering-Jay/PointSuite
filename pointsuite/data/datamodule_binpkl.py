@@ -215,7 +215,3 @@ class BinPklDataModule(DataModuleBase):
                 print(f"{split.upper()} 数据集: 未初始化")
         
         print("=" * 60)
-
-
-# 向后兼容：旧名称的别名
-PointDataModule = BinPklDataModule

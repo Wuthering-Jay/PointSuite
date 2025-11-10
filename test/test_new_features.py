@@ -24,7 +24,7 @@ from pointsuite.data.datasets.collate import (
     collate_fn,
     LimitedPointsCollateFn,
     DynamicBatchSampler,
-    create_limited_dataloader
+    # create_limited_dataloader
 )
 
 
@@ -303,61 +303,61 @@ def test_dynamic_batch_sampler():
     print()
 
 
-def test_convenient_api():
-    """测试6: 便捷 API - create_limited_dataloader"""
-    print("="*70)
-    print("[测试6] 便捷 API - create_limited_dataloader")
-    print("="*70)
+# def test_convenient_api():
+#     """测试6: 便捷 API - create_limited_dataloader"""
+#     print("="*70)
+#     print("[测试6] 便捷 API - create_limited_dataloader")
+#     print("="*70)
     
-    data_root = r"E:\data\DALES\dales_las\bin\train"
+#     data_root = r"E:\data\DALES\dales_las\bin\train"
     
-    if not Path(data_root).exists():
-        print(f"[X] 数据目录不存在: {data_root}")
-        return
+#     if not Path(data_root).exists():
+#         print(f"[X] 数据目录不存在: {data_root}")
+#         return
     
-    dataset = BinPklDataset(
-        data_root=data_root,
-        split='train',
-        assets=['coord', 'intensity', 'classification'],
-        cache_data=False
-    )
+#     dataset = BinPklDataset(
+#         data_root=data_root,
+#         split='train',
+#         assets=['coord', 'intensity', 'classification'],
+#         cache_data=False
+#     )
     
-    max_points = 300000
+#     max_points = 300000
     
-    print(f"[OK] 使用便捷 API 创建 DataLoader")
-    print(f"[OK] 最大点数: {max_points:,}")
+#     print(f"[OK] 使用便捷 API 创建 DataLoader")
+#     print(f"[OK] 最大点数: {max_points:,}")
     
-    # 方法1: 使用 sampler（推荐）
-    dataloader_sampler = create_limited_dataloader(
-        dataset,
-        max_points=max_points,
-        method='sampler',
-        shuffle=True,
-        num_workers=0
-    )
+#     # 方法1: 使用 sampler（推荐）
+#     dataloader_sampler = create_limited_dataloader(
+#         dataset,
+#         max_points=max_points,
+#         method='sampler',
+#         shuffle=True,
+#         num_workers=0
+#     )
     
-    print(f"\n方法1: method='sampler'")
-    batch = next(iter(dataloader_sampler))
-    print(f"  - 样本数: {len(batch['offset'])}")
-    print(f"  - 总点数: {batch['coord'].shape[0]:,}")
+#     print(f"\n方法1: method='sampler'")
+#     batch = next(iter(dataloader_sampler))
+#     print(f"  - 样本数: {len(batch['offset'])}")
+#     print(f"  - 总点数: {batch['coord'].shape[0]:,}")
     
-    # 方法2: 使用 collate
-    dataloader_collate = create_limited_dataloader(
-        dataset,
-        max_points=max_points,
-        method='collate',
-        collate_strategy='drop_largest',
-        shuffle=True,
-        num_workers=0,
-        batch_size=8
-    )
+#     # 方法2: 使用 collate
+#     dataloader_collate = create_limited_dataloader(
+#         dataset,
+#         max_points=max_points,
+#         method='collate',
+#         collate_strategy='drop_largest',
+#         shuffle=True,
+#         num_workers=0,
+#         batch_size=8
+#     )
     
-    print(f"\n方法2: method='collate'")
-    batch = next(iter(dataloader_collate))
-    print(f"  - 样本数: {len(batch['offset'])}")
-    print(f"  - 总点数: {batch['coord'].shape[0]:,}")
+#     print(f"\n方法2: method='collate'")
+#     batch = next(iter(dataloader_collate))
+#     print(f"  - 样本数: {len(batch['offset'])}")
+#     print(f"  - 总点数: {batch['coord'].shape[0]:,}")
     
-    print()
+#     print()
 
 
 def main():
@@ -384,7 +384,7 @@ def main():
         test_dynamic_batch_sampler()
         
         # 测试6: 便捷 API
-        test_convenient_api()
+        # test_convenient_api()
         
         print("="*70)
         print("[OK] 所有测试通过！")

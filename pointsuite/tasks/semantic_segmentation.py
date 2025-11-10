@@ -52,7 +52,7 @@ class SemanticSegmentationTask(BaseTask):
         # - PointNet++：需要整个 batch 字典
         
         if hasattr(self.backbone, 'forward') and 'batch' in self.backbone.forward.__code__.co_varnames:
-            # Backbone 接收整个 batch 字典（如 PointNet++）
+            # Backbone 接收整个 batch 字典
             backbone_output = self.backbone(batch)
         else:
             # Backbone 只接收特征张量（如简单 MLP）
@@ -98,12 +98,12 @@ class SemanticSegmentationTask(BaseTask):
         preds_logits = self.forward(batch)
         
         # 2. 计算最终的类别预测
-        preds_labels = torch.argmax(preds_logits, dim=-1)  # 使用 -1 以支持 [B, N, C] 或 [N, C]
+        # preds_labels = torch.argmax(preds_logits, dim=-1)  # 使用 -1 以支持 [B, N, C] 或 [N, C]
         
         # 3. 返回一个字典，PredictionWriter 回调将处理这个字典
         #    我们返回 CPU 张量以释放 GPU 内存
         results = {
-            "preds": preds_labels.cpu(),
+            # "preds": preds_labels.cpu(),
             "logits": preds_logits.cpu(),  # 也保存 logits 用于后处理
         }
         
@@ -111,6 +111,15 @@ class SemanticSegmentationTask(BaseTask):
         # 我们的数据集可能提供 'indices' 字段
         if "indices" in batch:
             results["indices"] = batch["indices"].cpu()
+        
+        # 🔥 新增：传递文件信息到 callback，避免推断
+        # 这些信息由 BinPklDataset 在 test split 时提供
+        if "bin_file" in batch:
+            results["bin_file"] = batch["bin_file"]  # 通常是字符串列表
+        if "bin_path" in batch:
+            results["bin_path"] = batch["bin_path"]
+        if "pkl_path" in batch:
+            results["pkl_path"] = batch["pkl_path"]
         
         # 保存坐标信息（用于可视化）
         if "coord" in batch:

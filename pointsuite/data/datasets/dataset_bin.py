@@ -471,6 +471,12 @@ class BinPklDataset(DatasetBase):
         # 在测试划分中，存储点索引用于投票机制
         if self.split == 'test':
             data['indices'] = indices.copy()  # 存储原始点索引
+            
+            # 🔥 新增：直接传递文件信息，避免在 callback 中推断
+            # 这些信息在 tile.py 中已经保存到 segment_info 中
+            data['bin_file'] = sample_info.get('bin_file', Path(sample_info['bin_path']).stem)
+            data['bin_path'] = sample_info['bin_path']
+            data['pkl_path'] = sample_info['pkl_path']
         
         return data
     
