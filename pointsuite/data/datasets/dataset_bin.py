@@ -24,7 +24,7 @@ class BinPklDataset(DatasetBase):
     - .pkl 文件：包含元数据，包括：
         - 片段信息（索引、边界、标签计数）
         - 原始 LAS 文件头
-        - 处理参数（window_size、grid_size 等）
+        - 处理参数
     
     每个片段成为一个训练样本
     """
@@ -47,9 +47,9 @@ class BinPklDataset(DatasetBase):
         参数：
             data_root: 包含 bin+pkl 文件的根目录，或单个 pkl 文件路径，
                       或 pkl 文件路径列表
-            split: 数据集划分（'train'、'val'、'test'）
+            split: 数据集划分（'train'、'val'、'test'、'predict'）
                   - train/val: 不存储点索引
-                  - test: 存储点索引用于预测投票机制
+                  - test/predict: 存储点索引用于预测投票机制
             assets: 要加载的数据属性列表（默认：['coord', 'intensity', 'classification']）
             transform: 要应用的数据变换
             ignore_label: 在训练中忽略的标签
@@ -81,7 +81,7 @@ class BinPklDataset(DatasetBase):
             ignore_label=ignore_label,
             loop=loop,
             cache_data=cache_data,
-            class_mapping=class_mapping  # 重要：传递 class_mapping 给父类
+            class_mapping=class_mapping  # 传递 class_mapping 给父类
         )
     
     def _load_data_list(self) -> List[Dict[str, Any]]:
@@ -342,7 +342,7 @@ class BinPklDataset(DatasetBase):
             - normal: [N, 3] 法向量（如果在 assets 中）
             - h_norm: [N,] 高度归一化值（如果在 assets 中）
             - class: [N,] 分类标签（如果在 assets 中）
-            - indices: [N,] 原始点索引（仅在 test split 中）
+            - indices: [N,] 原始点索引（仅在 test/predict split 中）
         """
         sample_info = self.data_list[idx]
         
@@ -453,23 +453,24 @@ class BinPklDataset(DatasetBase):
                 
                 # 如果提供了类别映射则应用
                 if self.class_mapping is not None:
-                    # 使用向量化方式映射类别
-                    # 创建一个初始值为原始标签的数组
-                    mapped_classification = classification.copy()
+                    # 🔥 新策略：不在 class_mapping 中的类别设为 ignore_label
+                    # 这些点会参与网络前向传播（保持数据连续性），
+                    # 但不参与损失计算和精度评估（通过 ignore_index 机制）
                     
-                    # 对映射表中的每个 (原始标签 -> 新标签) 对应用映射
+                    # 初始化所有标签为 ignore_label
+                    mapped_classification = np.full_like(classification, self.ignore_label, dtype=np.int64)
+                    
+                    # 只映射 class_mapping 中定义的类别
                     for original_label, new_label in self.class_mapping.items():
-                        # 找到所有原始标签等于 original_label的位置
                         mask = (classification == original_label)
-                        # 将这些位置的值设置为 new_label
                         mapped_classification[mask] = new_label
                     
                     data['class'] = mapped_classification
                 else:
                     data['class'] = classification
 
-        # 在测试划分中，存储点索引用于投票机制
-        if self.split == 'test':
+        # 在 test 和 predict 划分中，存储点索引用于投票机制
+        if self.split in ['test', 'predict']:
             data['indices'] = indices.copy()  # 存储原始点索引
             
             # 🔥 新增：直接传递文件信息，避免在 callback 中推断
@@ -589,6 +590,103 @@ class BinPklDataset(DatasetBase):
                 print(f"  类别 {label}: {count:,}")
         
         print("="*70)
+    
+    def get_class_distribution(self) -> Optional[Dict[int, int]]:
+        """
+        获取数据集的类别分布
+        
+        返回：
+            类别分布字典 {class_id: count}
+        """
+        if len(self.data_list) == 0:
+            return {}
+        
+        # 从第一个 pkl 文件获取整体类别分布
+        pkl_path = Path(self.data_list[0]['pkl_path'])
+        with open(pkl_path, 'rb') as f:
+            metadata = pickle.load(f)
+        
+        if 'label_counts' in metadata:
+            # 如果有 class_mapping，转换类别标签
+            if self.class_mapping is not None:
+                mapped_counts = {}
+                for original_label, count in metadata['label_counts'].items():
+                    if original_label in self.class_mapping:
+                        new_label = self.class_mapping[original_label]
+                        mapped_counts[new_label] = mapped_counts.get(new_label, 0) + count
+                return mapped_counts
+            else:
+                return dict(metadata['label_counts'])
+        
+        return {}
+    
+    def get_sample_weights(self, class_weights: Optional[Dict[int, float]] = None) -> Optional[np.ndarray]:
+        """
+        计算每个样本（segment）的权重
+        
+        权重计算策略：
+        - 样本权重 = Σ(样本中包含的每个类别的类别权重)
+        - 包含稀有类别的样本获得更高权重
+        - 包含多个不同类别的样本获得更高权重
+        
+        参数：
+            class_weights: 类别权重字典 {class_id: weight}
+        
+        返回：
+            样本权重数组 [num_samples]
+        """
+        if class_weights is None or len(self.data_list) == 0:
+            return None
+        
+        # 加载 pkl 元数据获取每个 segment 的类别信息
+        sample_weights = []
+        
+        # 按 pkl 文件分组处理（避免重复加载）
+        pkl_to_samples = {}
+        for idx, sample_info in enumerate(self.data_list):
+            pkl_path = sample_info['pkl_path']
+            if pkl_path not in pkl_to_samples:
+                pkl_to_samples[pkl_path] = []
+            pkl_to_samples[pkl_path].append((idx, sample_info['segment_id']))
+        
+        # 为每个 pkl 文件计算其 segments 的权重
+        weights_dict = {}
+        for pkl_path, samples in pkl_to_samples.items():
+            with open(pkl_path, 'rb') as f:
+                metadata = pickle.load(f)
+            
+            # 为每个 segment 计算权重
+            for idx, segment_id in samples:
+                segment_info = None
+                for seg in metadata['segments']:
+                    if seg['segment_id'] == segment_id:
+                        segment_info = seg
+                        break
+                
+                if segment_info is None or 'unique_labels' not in segment_info:
+                    # 如果没有类别信息，使用默认权重 1.0
+                    weights_dict[idx] = 1.0
+                    continue
+                
+                # 计算权重：包含的所有类别的类别权重之和
+                unique_labels = segment_info['unique_labels']
+                segment_weight = 0.0
+                
+                for label in unique_labels:
+                    # 如果有 class_mapping，先映射标签
+                    if self.class_mapping is not None:
+                        if label in self.class_mapping:
+                            mapped_label = self.class_mapping[label]
+                            segment_weight += class_weights.get(mapped_label, 0.0)
+                    else:
+                        segment_weight += class_weights.get(label, 0.0)
+                
+                weights_dict[idx] = max(segment_weight, 1e-6)  # 避免零权重
+        
+        # 按顺序构建权重数组
+        sample_weights = np.array([weights_dict.get(i, 1.0) for i in range(len(self.data_list))], dtype=np.float32)
+        
+        return sample_weights
 
 
 def create_dataset(
@@ -606,7 +704,7 @@ def create_dataset(
     
     参数：
         data_root: 根目录、单个 pkl 文件或 pkl 文件列表
-        split: 数据集划分（'train'、'val'、'test'）
+        split: 数据集划分（'train'、'val'、'test'、'predict'）
         assets: 要加载的数据属性列表
         transform: 数据变换
         ignore_label: 要忽略的标签
@@ -625,4 +723,5 @@ def create_dataset(
         ignore_label=ignore_label,
         loop=loop,
         cache_data=cache_data,
+        **kwargs
     )

@@ -45,6 +45,7 @@ def index_operator(data_dict, index, duplicate=False):
             "normal",
             "class",
             "instance",
+            "indices",  # 🔥 修复：在test/predict模式下，indices需要与其他字段同步过滤
         ]
     if not duplicate:
         for key in data_dict["index_valid_keys"]:

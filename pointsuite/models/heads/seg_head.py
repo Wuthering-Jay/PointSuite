@@ -1,4 +1,4 @@
-from modules.point_wise import PointBatchNorm, PointLayerNorm
+from ..modules.point_wise import PointBatchNorm, PointLayerNorm
 import torch.nn as nn
 import torch
 
@@ -14,6 +14,8 @@ class SegHead(nn.Module):
             norm_layer: nn.Module = PointLayerNorm,
     ):
         super().__init__()
+        self.num_classes = num_classes  # 保存类别数，供 callbacks 使用
+        self.out_channels = num_classes  # 别名，兼容性
         self.seg_head = nn.Sequential(
             nn.Linear(in_channels, in_channels),
             norm_layer(in_channels),

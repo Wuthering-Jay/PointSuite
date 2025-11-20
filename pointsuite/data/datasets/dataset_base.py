@@ -70,7 +70,7 @@ class DatasetBase(Dataset, ABC):
         self.assets = assets if assets is not None else self.VALID_ASSETS.copy()
         self.transform = Compose(transform) if transform is not None else None
         self.ignore_label = ignore_label
-        self.loop = (loop if split == 'train' else 1)
+        self.loop = loop  # 支持所有 split 的 loop（Test-Time Augmentation）
         self.cache_data = cache_data
         self.class_mapping = class_mapping
         
@@ -167,6 +167,94 @@ class DatasetBase(Dataset, ABC):
         """
         data_idx = idx % len(self.data_list)
         return self.data_list[data_idx]
+    
+    def get_class_distribution(self) -> Optional[Dict[int, int]]:
+        """
+        获取数据集的类别分布（每个类别的样本点数）
+        
+        子类应重写此方法以提供特定格式的类别统计
+        
+        返回：
+            类别分布字典 {class_id: count}，如果不支持则返回 None
+        """
+        return None
+    
+    def get_sample_weights(self, class_weights: Optional[Dict[int, float]] = None) -> Optional[np.ndarray]:
+        """
+        计算每个样本的权重（用于 WeightedRandomSampler）
+        
+        样本权重基于其包含的类别权重之和，这样：
+        - 包含稀有类别的样本获得更高权重
+        - 包含多个类别的样本获得更高权重
+        
+        参数：
+            class_weights: 类别权重字典 {class_id: weight}
+                          如果为 None，则返回 None（不支持加权采样）
+        
+        返回：
+            样本权重数组 [num_samples]，如果不支持则返回 None
+        """
+        return None
+    
+    def compute_class_weights(
+        self,
+        method: str = 'inverse',
+        smooth: float = 1.0,
+        normalize: bool = True
+    ) -> Optional[Dict[int, float]]:
+        """
+        从数据集的类别分布计算类别权重
+        
+        这是一个便捷方法，基于 get_class_distribution() 自动计算权重
+        子类通常不需要重写此方法，只需实现 get_class_distribution()
+        
+        参数：
+            method: 权重计算方法
+                   - 'inverse': 1 / count（反比例）
+                   - 'sqrt_inverse': 1 / sqrt(count)（平方根反比例）
+                   - 'log_inverse': 1 / log(count + 1)（对数反比例）
+                   - 'effective_num': Effective Number of Samples (ENS) 方法
+            smooth: 平滑参数，避免权重过大（加到分母上）
+            normalize: 是否归一化权重使其和为 num_classes
+        
+        返回：
+            类别权重字典 {class_id: weight}，如果不支持则返回 None
+        """
+        class_distribution = self.get_class_distribution()
+        if class_distribution is None or len(class_distribution) == 0:
+            return None
+        
+        # 转换为数组格式
+        num_classes = max(class_distribution.keys()) + 1
+        counts = np.zeros(num_classes, dtype=np.float64)
+        for class_id, count in class_distribution.items():
+            counts[class_id] = count
+        
+        # 处理空类别
+        empty_classes = np.where(counts == 0)[0]
+        if len(empty_classes) > 0:
+            counts[empty_classes] = 1.0
+        
+        # 计算权重
+        if method == 'inverse':
+            weights = 1.0 / (counts + smooth)
+        elif method == 'sqrt_inverse':
+            weights = 1.0 / np.sqrt(counts + smooth)
+        elif method == 'log_inverse':
+            weights = 1.0 / np.log(counts + smooth + 1)
+        elif method == 'effective_num':
+            beta = 0.9999
+            effective_num = 1.0 - np.power(beta, counts)
+            weights = (1.0 - beta) / (effective_num + 1e-8)
+        else:
+            raise ValueError(f"未知的权重计算方法: {method}")
+        
+        # 归一化
+        if normalize:
+            weights = weights * num_classes / weights.sum()
+        
+        # 转换为字典
+        return {i: float(weights[i]) for i in range(num_classes) if counts[i] > 0}
 
 
 

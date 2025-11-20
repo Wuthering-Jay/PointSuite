@@ -12,7 +12,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from pointsuite.data.datasets.dataset_bin import BinPklDataset
-from pointsuite.data.datamodule_binpkl import BinPklDataModule
+from pointsuite.data.datamodule_bin import BinPklDataModule
 from pointsuite.data.transforms import (
     CenterShift, AutoNormalizeHNorm, Collect, ToTensor
 )

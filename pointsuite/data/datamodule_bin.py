@@ -4,7 +4,7 @@ BinPkl 格式专用 DataModule
 本模块提供了一个专门用于 BinPkl 数据集格式的 PyTorch Lightning DataModule
 """
 
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from .datamodule_base import DataModuleBase
 from .datasets.dataset_bin import BinPklDataset
 
@@ -17,57 +17,71 @@ class BinPklDataModule(DataModuleBase):
     其中点云数据存储在二进制文件（.bin）中，元数据存储在 pickle 文件（.pkl）中
     
     特性：
-    - 自动设置训练/验证/测试数据集
+    - 灵活的数据路径配置（支持跨目录文件）
+    - 独立的训练/验证/测试/预测数据集配置
     - 支持 DynamicBatchSampler 进行内存控制
-    - 支持 WeightedRandomSampler 处理类别不平衡
+    - 支持 WeightedRandomSampler 处理类别不平衡（独立于 DynamicBatchSampler）
     - 可配置资产（坐标、强度、颜色、分类等）
     - 支持类别标签映射
     - 数据缓存和循环选项
     
     示例：
-        >>> # 基本用法
+        >>> # 基本用法：跨目录配置
         >>> datamodule = BinPklDataModule(
-        ...     data_root='path/to/data',
-        ...     train_files=['train.pkl'],
-        ...     val_files=['val.pkl'],
+        ...     train_data='data/train',  # 或文件列表
+        ...     val_data='data/val',
+        ...     test_data='data/test',
         ...     batch_size=8,
         ...     num_workers=4
         ... )
-        >>> datamodule.setup()
         >>> 
-        >>> # 使用 DynamicBatchSampler 和加权采样
+        >>> # 使用 DynamicBatchSampler 和独立的加权采样
         >>> datamodule = BinPklDataModule(
-        ...     data_root='path/to/data',
+        ...     train_data=['data/train/file1.pkl', 'data/other/file2.pkl'],
+        ...     val_data='data/val',
         ...     use_dynamic_batch=True,
         ...     max_points=500000,
-        ...     train_sampler_weights=weights,
+        ...     use_weighted_sampler=True,
+        ...     train_sampler_weights=weights,  # 长度 = len(train_dataset) * loop
         ...     assets=['coord', 'intensity', 'classification']
         ... )
         >>> 
-        >>> # 与 Trainer 一起使用
-        >>> trainer = pl.Trainer()
-        >>> trainer.fit(model, datamodule)
+        >>> # 独立的预测数据集
+        >>> datamodule = BinPklDataModule(
+        ...     train_data='data/train',
+        ...     val_data='data/val',
+        ...     test_data='data/test',
+        ...     predict_data='data/new_scenes',  # 不同于 test
+        ... )
     """
     
     def __init__(
         self,
-        data_root: str,
-        train_files: Optional[List[str]] = None,
-        val_files: Optional[List[str]] = None,
-        test_files: Optional[List[str]] = None,
+        train_data: Optional[Any] = None,
+        val_data: Optional[Any] = None,
+        test_data: Optional[Any] = None,
+        predict_data: Optional[Any] = None,
         batch_size: int = 8,
         num_workers: int = 4,
         assets: Optional[List[str]] = None,
         train_transforms: Optional[List] = None,
         val_transforms: Optional[List] = None,
         test_transforms: Optional[List] = None,
+        predict_transforms: Optional[List] = None,
         ignore_label: int = -1,
-        loop: int = 1,
+        train_loop: int = 1,
+        val_loop: int = 1,
+        test_loop: int = 1,
+        predict_loop: int = 1,
         cache_data: bool = False,
         class_mapping: Optional[Dict[int, int]] = None,
+        class_names: Optional[List[str]] = None,
         h_norm_grid: Optional[float] = 1.0,
         use_dynamic_batch: bool = False,
         max_points: int = 500000,
+        use_dynamic_batch_inference: bool = False,
+        max_points_inference: Optional[int] = None,
+        use_weighted_sampler: bool = False,
         train_sampler_weights: Optional[List[float]] = None,
         pin_memory: bool = True,
         persistent_workers: bool = False,
@@ -78,10 +92,13 @@ class BinPklDataModule(DataModuleBase):
         初始化 BinPklDataModule
         
         参数：
-            data_root: 包含数据文件的根目录
-            train_files: 训练 pkl 文件名列表。如果为 None，则从 data_root 自动发现
-            val_files: 验证 pkl 文件名列表。如果为 None，则从 data_root 自动发现
-            test_files: 测试 pkl 文件名列表。如果为 None，则从 data_root 自动发现
+            train_data: 训练数据路径，可以是:
+                       - 字符串：单个 pkl 文件或包含 pkl 文件的目录
+                       - 列表：pkl 文件路径列表（支持跨目录）
+                       - None：不使用训练数据
+            val_data: 验证数据路径（格式同 train_data）
+            test_data: 测试数据路径（格式同 train_data）
+            predict_data: 预测数据路径（格式同 train_data），如果为 None 则使用 test_data
             batch_size: DataLoader 的批次大小（当 use_dynamic_batch=True 时不使用）
             num_workers: 数据加载的工作进程数
             assets: 要加载的数据属性列表（例如 ['coord', 'intensity', 'classification']）
@@ -89,44 +106,72 @@ class BinPklDataModule(DataModuleBase):
             train_transforms: 训练数据的变换列表
             val_transforms: 验证数据的变换列表
             test_transforms: 测试数据的变换列表
+            predict_transforms: 预测数据的变换列表，如果为 None 则使用 test_transforms
             ignore_label: 在训练/评估中忽略的标签
-            loop: 遍历训练数据集的次数（用于数据增强）
+            train_loop: 训练数据集循环次数（数据增强），默认 1
+                       ⚠️ 如果使用 train_sampler_weights，weights 长度必须 = 样本数 * train_loop
+            val_loop: 验证数据集循环次数（Test-Time Augmentation），默认 1
+                     设置 > 1 启用 TTA，通过多次增强投票提高精度
+            test_loop: 测试数据集循环次数（Test-Time Augmentation），默认 1
+            predict_loop: 预测数据集循环次数（Test-Time Augmentation），默认 1
             cache_data: 是否在内存中缓存加载的数据
             class_mapping: 将原始类别标签映射到连续标签的字典
                           示例：{0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
+                          不在 mapping 中的类别会被设为 ignore_label
+            class_names: 类别名称列表（按映射后的连续标签顺序）
+                        示例：['Ground', 'Vegetation', 'Building', 'Car', 'Wire']
+                        如果为 None，指标计算时会使用 "Class n" 格式
+                        如果有 class_mapping，会使用原始标签号（如 "Class 6"）
             h_norm_grid: 计算归一化高程时使用的栅格分辨率（米）
-            use_dynamic_batch: 是否使用 DynamicBatchSampler（推荐用于内存控制）
-                              如果为 True，batch_size 参数将被忽略
-            max_points: 每个批次的最大点数（仅在 use_dynamic_batch=True 时使用）
-            train_sampler_weights: WeightedRandomSampler 的可选权重（仅用于训练）
-                                  如果提供，将为训练创建 WeightedRandomSampler
-                                  可与 use_dynamic_batch=True 一起使用
-            pin_memory: 是否在 DataLoader 中使用固定内存（更快的 GPU 传输）
-            persistent_workers: 在 epoch 之间保持工作进程活动（更快但使用更多内存）
+            use_dynamic_batch: 是否在训练阶段使用 DynamicBatchSampler（推荐用于内存控制）
+            max_points: 训练阶段每个批次的最大点数（仅在 use_dynamic_batch=True 时使用）
+            use_dynamic_batch_inference: 是否在推理阶段（val/test/predict）使用 DynamicBatchSampler
+                                        默认为 False（与训练阶段独立）
+                                        推荐：大场景推理时设置为 True 以避免 OOM
+                                        注意：与 TTA (loop > 1) 一起使用时，点数基于 transform 前的值预计算
+                                              如果 transform 大幅增加点数（如密集采样），请谨慎使用
+            max_points_inference: 推理阶段每个批次的最大点数
+                                 如果为 None，则使用 max_points 的值
+                                 推荐：推理时通常可以比训练时更大
+            use_weighted_sampler: 是否使用 WeightedRandomSampler（独立于 use_dynamic_batch）
+            train_sampler_weights: WeightedRandomSampler 的权重列表（仅用于训练）
+                                  长度必须等于 len(train_dataset)，考虑 loop
+                                  示例：如果 loop=2，weights = original_weights * 2
+                                  ⚠️ 不会保存到超参数中（数组太长）
+            pin_memory: 是否在 DataLoader 中使用固定内存
+            persistent_workers: 在 epoch 之间保持工作进程活动
             prefetch_factor: 每个工作进程预取的批次数
             **kwargs: 传递给 BinPklDataset 的其他参数
         """
         # 存储 BinPklDataset 特定参数
         self.assets = assets or ['coord', 'intensity', 'classification']
         self.ignore_label = ignore_label
-        self.loop = loop
         self.cache_data = cache_data
         self.class_mapping = class_mapping
+        self.class_names = class_names
         self.h_norm_grid = h_norm_grid
         
         # Call parent constructor
         super().__init__(
-            data_root=data_root,
-            train_files=train_files,
-            val_files=val_files,
-            test_files=test_files,
+            train_data=train_data,
+            val_data=val_data,
+            test_data=test_data,
+            predict_data=predict_data,
             batch_size=batch_size,
             num_workers=num_workers,
             train_transforms=train_transforms,
             val_transforms=val_transforms,
             test_transforms=test_transforms,
+            predict_transforms=predict_transforms,
+            train_loop=train_loop,
+            val_loop=val_loop,
+            test_loop=test_loop,
+            predict_loop=predict_loop,
             use_dynamic_batch=use_dynamic_batch,
             max_points=max_points,
+            use_dynamic_batch_inference=use_dynamic_batch_inference,
+            max_points_inference=max_points_inference,
+            use_weighted_sampler=use_weighted_sampler,
             train_sampler_weights=train_sampler_weights,
             pin_memory=pin_memory,
             persistent_workers=persistent_workers,
@@ -140,19 +185,28 @@ class BinPklDataModule(DataModuleBase):
         
         参数：
             data_paths: pkl 文件的路径
-            split: 数据集划分（'train'、'val'、'test'）
+            split: 数据集划分（'train'、'val'、'test'、'predict'）
             transforms: 要应用的变换列表
             
         返回：
             BinPklDataset 实例
         """
+        # 根据 split 选择对应的 loop
+        loop_map = {
+            'train': self.train_loop,
+            'val': self.val_loop,
+            'test': self.test_loop,
+            'predict': self.predict_loop,
+        }
+        loop = loop_map.get(split, 1)
+        
         return BinPklDataset(
             data_root=data_paths,
             split=split,
             assets=self.assets,
             transform=transforms,
             ignore_label=self.ignore_label,
-            loop=self.loop if split == 'train' else 1,  # 仅对训练进行循环
+            loop=loop,
             cache_data=self.cache_data,
             class_mapping=self.class_mapping,
             h_norm_grid=self.h_norm_grid,
@@ -185,25 +239,36 @@ class BinPklDataModule(DataModuleBase):
         print("=" * 60)
         print("BinPklDataModule 信息")
         print("=" * 60)
-        print(f"数据根目录: {self.data_root}")
+        print(f"训练数据: {self.train_data}")
+        print(f"验证数据: {self.val_data}")
+        print(f"测试数据: {self.test_data}")
+        print(f"预测数据: {self.predict_data}")
         print(f"数据集类型: BinPklDataset")
         print(f"资产: {self.assets}")
         print(f"忽略标签: {self.ignore_label}")
-        print(f"循环次数（训练）: {self.loop}")
+        print(f"循环配置:")
+        print(f"  - 训练: {self.train_loop}")
+        print(f"  - 验证: {self.val_loop} {'(TTA 启用)' if self.val_loop > 1 else ''}")
+        print(f"  - 测试: {self.test_loop} {'(TTA 启用)' if self.test_loop > 1 else ''}")
+        print(f"  - 预测: {self.predict_loop} {'(TTA 启用)' if self.predict_loop > 1 else ''}")
         print(f"缓存数据: {self.cache_data}")
         if self.class_mapping:
             print(f"类别映射: {self.class_mapping}")
+        if self.class_names:
+            print(f"类别名称: {self.class_names}")
         print(f"使用动态批次: {self.use_dynamic_batch}")
         if self.use_dynamic_batch:
             print(f"每批次最大点数: {self.max_points}")
-            print(f"加权采样: {'是' if self.train_sampler_weights is not None else '否'}")
         else:
             print(f"批次大小: {self.batch_size}")
+        print(f"使用加权采样: {self.use_weighted_sampler}")
+        if self.use_weighted_sampler and self.train_sampler_weights is not None:
+            print(f"权重数量: {len(self.train_sampler_weights)}")
         print(f"工作进程数: {self.num_workers}")
         print(f"合并函数: {self.collate_fn.__name__ if hasattr(self.collate_fn, '__name__') else type(self.collate_fn).__name__}")
         print("-" * 60)
         
-        for split in ['train', 'val', 'test']:
+        for split in ['train', 'val', 'test', 'predict']:
             try:
                 info = super().get_dataset_info(split)
                 print(f"{split.upper()} 数据集:")

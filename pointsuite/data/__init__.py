@@ -14,7 +14,10 @@ PointSuite 数据模块
 
 # 基类
 from .datamodule_base import DataModuleBase
-from .datamodule_binpkl import BinPklDataModule, PointDataModule
+from .datamodule_bin import BinPklDataModule
+
+# 向后兼容别名
+PointDataModule = BinPklDataModule
 
 # 数据集
 from .datasets.dataset_base import DatasetBase

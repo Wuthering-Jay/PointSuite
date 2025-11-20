@@ -49,9 +49,17 @@ class SemanticSegmentationTask(BaseTask):
         # 1. Backbone 提取特征
         # 不同 backbone 可能有不同的输入格式：
         # - 简单模型：直接接收 batch['feat']
-        # - PointNet++：需要整个 batch 字典
+        # - PointTransformerV2/PointNet++：需要整个 batch 字典
         
-        if hasattr(self.backbone, 'forward') and 'batch' in self.backbone.forward.__code__.co_varnames:
+        # 检查 backbone 是否需要整个 batch 字典
+        # 方法1: 检查参数名是否为 'batch' 或 'data_dict'
+        # 方法2: 检查是否为 PointTransformerV2 等已知需要 dict 的模型
+        forward_params = self.backbone.forward.__code__.co_varnames if hasattr(self.backbone, 'forward') else []
+        needs_dict = ('batch' in forward_params or 
+                     'data_dict' in forward_params or
+                     'PointTransformerV2' in self.backbone.__class__.__name__)
+        
+        if needs_dict:
             # Backbone 接收整个 batch 字典
             backbone_output = self.backbone(batch)
         else:
@@ -92,19 +100,28 @@ class SemanticSegmentationTask(BaseTask):
 
     def predict_step(self, batch: Dict[str, Any], batch_idx: int, dataloader_idx: int = 0) -> Dict[str, torch.Tensor]:
         """
-        执行单个预测步骤 (用于生产)。
+        执行单个预测步骤（用于生产环境、无真值标签）
+        
+        与 test_step 的区别：
+        - predict_step: 无真值标签，不计算损失和指标，只返回预测结果
+        - test_step: 有真值标签，计算损失和指标，可选保存预测结果
+        
+        使用场景：
+        - 新场景预测（无标签）
+        - 生产环境部署
+        - 需要保存 .las 文件时使用 Trainer.predict() + SegmentationWriter
         """
         # 1. 前向传播
-        preds_logits = self.forward(batch)
+        preds = self.forward(batch)
         
-        # 2. 计算最终的类别预测
-        # preds_labels = torch.argmax(preds_logits, dim=-1)  # 使用 -1 以支持 [B, N, C] 或 [N, C]
+        # 2. 后处理预测 (支持 Mask3D 等复杂输出)
+        #    子类可以覆盖 postprocess_predictions 来自定义行为
+        processed_preds = self.postprocess_predictions(preds)
         
         # 3. 返回一个字典，PredictionWriter 回调将处理这个字典
         #    我们返回 CPU 张量以释放 GPU 内存
         results = {
-            # "preds": preds_labels.cpu(),
-            "logits": preds_logits.cpu(),  # 也保存 logits 用于后处理
+            "logits": processed_preds.cpu(),  # 可以是 logits [N, C] 或 labels [N]
         }
         
         # (可选) 如果需要原始索引 (用于拼接/投票)
@@ -112,14 +129,14 @@ class SemanticSegmentationTask(BaseTask):
         if "indices" in batch:
             results["indices"] = batch["indices"].cpu()
         
-        # 🔥 新增：传递文件信息到 callback，避免推断
-        # 这些信息由 BinPklDataset 在 test split 时提供
+        # 🔥 传递文件信息到 callback（用于预测结果的文件级聚合）
+        # 这些信息由 dataset 在 test/predict split 时提供
         if "bin_file" in batch:
-            results["bin_file"] = batch["bin_file"]  # 通常是字符串列表
+            results["bin_file"] = batch["bin_file"]  # 文件标识符（可能是字符串列表）
         if "bin_path" in batch:
-            results["bin_path"] = batch["bin_path"]
+            results["bin_path"] = batch["bin_path"]  # 原始数据文件路径
         if "pkl_path" in batch:
-            results["pkl_path"] = batch["pkl_path"]
+            results["pkl_path"] = batch["pkl_path"]  # 元数据文件路径
         
         # 保存坐标信息（用于可视化）
         if "coord" in batch:

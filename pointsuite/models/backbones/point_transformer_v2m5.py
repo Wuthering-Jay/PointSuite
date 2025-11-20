@@ -1,4 +1,4 @@
-from modules.point_wise import *
+from ..modules.point_wise import *
 from timm.layers import DropPath
 from copy import deepcopy
 
@@ -100,7 +100,9 @@ class BlockSequence(nn.Module):
     def forward(self, points):
         coord, feat, offset = points 
         with torch.no_grad():
-            reference_index, _ = pointops.knn_query(self.neighbours, coord, offset)
+            # pointops.knn_query 需要 FP32 坐标
+            coord_fp32 = coord.float() if coord.dtype == torch.float16 else coord
+            reference_index, _ = pointops.knn_query(self.neighbours, coord_fp32, offset)
         
         for block in self.blocks:
             points = block(points, reference_index)
@@ -295,7 +297,6 @@ class PointTransformerV2(nn.Module):
     Point Transformer V2
     Args:
         in_channels: 输入维度
-        num_classes: 输出维度
         patch_embed_depth: Patch Embedding深度
         patch_embed_channels: Patch Embedding输出维度
         patch_embed_groups: Patch Embedding分组数量
@@ -319,7 +320,6 @@ class PointTransformerV2(nn.Module):
     def __init__(
         self,
         in_channels,
-        num_classes,
         patch_embed_depth=1,
         patch_embed_channels=48,
         patch_embed_groups=6,
@@ -342,7 +342,6 @@ class PointTransformerV2(nn.Module):
     ):
         super(PointTransformerV2, self).__init__()
         self.in_channels = in_channels
-        self.num_classes = num_classes
         self.num_stages = len(enc_depths)
         assert self.num_stages == len(dec_depths)
         assert self.num_stages == len(enc_channels)

@@ -19,7 +19,7 @@ def test_imports():
         print("✅ DataModuleBase 导入成功")
         
         # 测试具体实现导入
-        from pointsuite.data.datamodule_binpkl import BinPklDataModule
+        from pointsuite.data.datamodule_bin import BinPklDataModule
         print("✅ BinPklDataModule 导入成功")
         
         # 测试向后兼容性导入
@@ -54,7 +54,7 @@ def test_class_hierarchy():
     
     try:
         from pointsuite.data.datamodule_base import DataModuleBase
-        from pointsuite.data.datamodule_binpkl import BinPklDataModule
+        from pointsuite.data.datamodule_bin import BinPklDataModule
         import pytorch_lightning as pl
         from abc import ABC
         
@@ -92,7 +92,7 @@ def test_methods():
     
     try:
         from pointsuite.data.datamodule_base import DataModuleBase
-        from pointsuite.data.datamodule_binpkl import BinPklDataModule
+        from pointsuite.data.datamodule_bin import BinPklDataModule
         
         required_methods = [
             '__init__',
@@ -144,7 +144,7 @@ def test_backward_compatibility():
     try:
         # 旧的导入方式应该仍然有效
         from pointsuite.data.point_datamodule import PointDataModule
-        from pointsuite.data.datamodule_binpkl import BinPklDataModule
+        from pointsuite.data.datamodule_bin import BinPklDataModule
         
         # 验证它们是同一个类
         assert PointDataModule is BinPklDataModule
@@ -187,7 +187,7 @@ def test_documentation():
     
     try:
         from pointsuite.data.datamodule_base import DataModuleBase
-        from pointsuite.data.datamodule_binpkl import BinPklDataModule
+        from pointsuite.data.datamodule_bin import BinPklDataModule
         
         # 检查类文档
         assert DataModuleBase.__doc__ is not None

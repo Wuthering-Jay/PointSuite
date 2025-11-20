@@ -667,7 +667,8 @@ class LASProcessorToBinWithGridSample:
         optional_fields = ['intensity', 'return_number', 'number_of_returns', 
                           'classification', 'scan_angle_rank', 'user_data', 
                           'point_source_id', 'gps_time', 
-                          'red', 'green', 'blue', 'nir']
+                          'red', 'green', 'blue', 'nir',
+                          'edge_of_flight_line']
         
         # 构建字段列表：只保存实际存在且有数据的字段
         fields_to_save = []
@@ -953,17 +954,17 @@ def load_all_segments_info(pkl_path: Union[str, Path]) -> List[Dict[str, Any]]:
 
 if __name__ == "__main__":
     # 示例：处理LAS文件（带Grid Sampling）
-    input_path = r"E:\data\Dales\dales_las\test"
-    output_dir = r"E:\data\Dales\dales_las\bin\test"
+    input_path = r"E:\data\DALES\dales_las\test"
+    output_dir = r"E:\data\DALES\dales_las\bin\test"
     window_size = (50.0, 50.0)
     min_points = 4096 * 5
-    max_points = 4096 * 20
+    max_points = 4096 * 10
     overlap = True
-    grid_size = None  # 🔥 设置grid size启用grid sampling
-    max_loops = 10  # 🔥 最大采样循环次数（避免极端情况）
+    grid_size = 0.5  # 🔥 设置grid size启用grid sampling
+    max_loops = 10  # 🔥 grid size开启时的最大采样循环次数（避免极端情况）
     shuffle_points = True  # 🔥 打乱体素内点顺序（提高随机性）
-    ground_class = 1  # 🔥 地面点的classification值（None则不生成is_ground字段）
     max_workers = None  # 自动检测CPU核心数
+    ground_class = None  # 🔥 地面点的classification值（None则不生成is_ground字段）
     
     # 处理文件（并行处理在单个LAS文件内部进行）
     process_las_files_to_bin_with_gridsample(

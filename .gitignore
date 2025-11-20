@@ -21,6 +21,12 @@ wheels/
 *.egg
 MANIFEST
 
+# Training outputs
+outputs/
+*.ckpt
+*.pth
+*.pt
+
 # PyInstaller
 *.manifest
 *.spec

@@ -127,8 +127,10 @@ class GroupedVectorAttention(nn.Module):
             self.linear_k(feat), # [n, c]
             self.linear_v(feat), # [n, c]
         )
-        key = pointops.grouping(reference_index, key, coord, with_xyz=True) # [n, k, 3+c]
-        value = pointops.grouping(reference_index, value, coord, with_xyz=False) # [n, k, c]
+        
+        # pointops.grouping 只支持 FP32 输入，输出让 autocast 管理
+        key = pointops.grouping(reference_index, key.float(), coord.float(), with_xyz=True) # [n, k, 3+c]
+        value = pointops.grouping(reference_index, value.float(), coord.float(), with_xyz=False) # [n, k, c]
         pos, key = key[:, :, 0:3], key[:, :, 3:] # [n, k, 3], [n, k, c]
         relation_qk = key - query.unsqueeze(1) # [n, k ,c], 邻域内与中心点的相对位置, 用于相对位置编码
         if self.pe_multiplier: # 乘性因子
@@ -142,7 +144,10 @@ class GroupedVectorAttention(nn.Module):
         weight = self.weight_encoding(relation_qk) # [n, k, g]
         weight = self.attn_drop(self.softmax(weight)) # [n, k, g]
 
-        mask = torch.sign(reference_index + 1) # [n, k], 无效邻域点标记为0
+        # mask 操作不需要梯度
+        with torch.no_grad():
+            mask = torch.sign(reference_index + 1) # [n, k], 无效邻域点标记为0
+        
         weight = torch.einsum("n s g, n s -> n s g", weight, mask) # [n, k, g]
         value = einops.rearrange(value, "n ns (g i) -> n ns g i", g=self.groups) # [n, k, g, i]
         feat = torch.einsum("n s g i, n s g -> n g i", value, weight) # [n, g, i]
@@ -184,11 +189,13 @@ class PointNetLayer(nn.Module):
     def forward(self, points):
         coord, feat, offset = points
         
-        # KNN 查询不需要梯度
+        # KNN 查询需要 FP32 坐标
         with torch.no_grad():
-            reference_index, _ = pointops.knn_query(self.k_neighbors, coord, offset)
+            reference_index, _ = pointops.knn_query(self.k_neighbors, coord.float(), offset)
         
-        grouped_features = pointops.grouping(reference_index, feat, coord, with_xyz=False)
+        # pointops.grouping 只支持 FP32 输入，输出让 autocast 管理
+        grouped_features = pointops.grouping(reference_index, feat.float(), coord.float(), with_xyz=False)
+        
         n_points = grouped_features.shape[0]
         grouped_features = grouped_features.reshape(-1, grouped_features.shape[-1])
         out = self.shared_mlp(grouped_features)
@@ -228,28 +235,39 @@ class GridPool(nn.Module):
         coord, feat, offset = points # [n, 3] [n, c] [b]
         batch = offset2batch(offset) # [b] -> [n]
         feat = self.act(self.norm(self.fc(feat))) # [n, c]
-        start = (
-            segment_csr(
-                coord,
-                torch.cat([batch.new_zeros(1), torch.cumsum(batch.bincount(), dim=0)]),
-                reduce="min",
-            ) # [b, 3], 求每个batch的最小点
-            if start is None
-            else start
-        )
+        
+        # 坐标操作需要 FP32 精度，但不禁用 autocast
+        # 只在需要时转换 coord 到 FP32，让 feat 保持 autocast 的类型
+        coord_fp32 = coord.float()
+        
+        # 计算 start (batch 内每个样本的最小坐标)
+        with torch.no_grad():
+            start = (
+                segment_csr(
+                    coord_fp32,
+                    torch.cat([batch.new_zeros(1), torch.cumsum(batch.bincount(), dim=0)]),
+                    reduce="min",
+                )
+                if start is None
+                else start
+            )
+        
+        # voxel_grid 和后续操作不能在 no_grad 中，因为需要跟踪梯度
         cluster = voxel_grid(
-            pos=coord - start[batch], size=self.grid_size, batch=batch, start=0
-        ) # [n], 计算每个点在网格中的索引
+            pos=coord_fp32 - start[batch], size=self.grid_size, batch=batch, start=0
+        )
         unique, cluster, counts = torch.unique(
             cluster, sorted=True, return_inverse=True, return_counts=True
         )
-        _, sorted_cluster_indices = torch.sort(cluster) # 格网化索引
-        idx_ptr = torch.cat([counts.new_zeros(1), torch.cumsum(counts, dim=0)]) # [v+1], 体素分段
-        coord = segment_csr(coord[sorted_cluster_indices], idx_ptr, reduce="mean") # [v, 3], 坐标平均池化
-        feat = segment_csr(feat[sorted_cluster_indices], idx_ptr, reduce="max") # [v, c], 特征最大池化
-        batch = batch[idx_ptr[:-1]] # [v]
-        offset = batch2offset(batch) # [v] -> [b]
-        return [coord, feat, offset], cluster
+        _, sorted_cluster_indices = torch.sort(cluster)
+        idx_ptr = torch.cat([counts.new_zeros(1), torch.cumsum(counts, dim=0)])
+        
+        # 输出坐标用 FP32，feat 保持原始类型
+        coord = segment_csr(coord_fp32[sorted_cluster_indices], idx_ptr, reduce="mean")
+        feat = segment_csr(feat[sorted_cluster_indices], idx_ptr, reduce="max")
+        batch = batch[idx_ptr[:-1]]
+        offset = batch2offset(batch)
+        return [coord, feat, offset], cluster  # 不 detach，让 PyTorch 管理梯度
     
 class UnpoolWithSkip(nn.Module):
     """
@@ -299,12 +317,16 @@ class UnpoolWithSkip(nn.Module):
         """
         coord, feat, offset = points # [n, 3] [n, c] [b]
         skip_coord, skip_feat, skip_offset = skip_points # [ns, 3] [ns, c] [b]
+        
         if self.backend == "map" and cluster is not None:
             feat = self.proj(feat)[cluster] # [n, c] -> [ns, c], 投影上采样
         else:
+            # pointops.interpolation 只支持 FP32 输入，输出让 autocast 管理
+            feat_proj = self.proj(feat)
             feat = pointops.interpolation(
-                coord, skip_coord, self.proj(feat), offset, skip_offset
+                coord.float(), skip_coord.float(), feat_proj.float(), offset, skip_offset
             ) # [n, c] -> [ns, c], 插值上采样
+        
         if self.skip: # 跳跃连接，特征融合
             feat = feat + self.proj_skip(skip_feat) # [ns, c]
         return [skip_coord, feat, skip_offset] # [ns, 3] [ns, c] [b]

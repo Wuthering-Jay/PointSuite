@@ -17,6 +17,31 @@ except ImportError:
     print("请运行: pip install laspy")
 
 
+# ============================================
+# 辅助函数
+# ============================================
+
+def create_reverse_class_mapping(class_mapping: Dict[int, int]) -> Dict[int, int]:
+    """
+    从 class_mapping 创建 reverse_class_mapping
+    
+    Args:
+        class_mapping: 原始标签 -> 连续标签的映射
+                      例如: {0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
+    
+    Returns:
+        reverse_class_mapping: 连续标签 -> 原始标签的映射
+                              例如: {0: 0, 1: 1, 2: 2, 3: 6, 4: 9}
+    
+    Example:
+        >>> class_mapping = {0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
+        >>> reverse_mapping = create_reverse_class_mapping(class_mapping)
+        >>> print(reverse_mapping)
+        {0: 0, 1: 1, 2: 2, 3: 6, 4: 9}
+    """
+    return {v: k for k, v in class_mapping.items()}
+
+
 class SegmentationWriter(BasePredictionWriter):
     """
     用于语义分割的 PredictionWriter 回调 (适配 bin+pkl 数据格式)
@@ -68,7 +93,8 @@ class SegmentationWriter(BasePredictionWriter):
                  write_interval: str = "batch", 
                  num_classes: int = -1,
                  save_logits: bool = False,
-                 reverse_class_mapping: Optional[Dict[int, int]] = None):
+                 reverse_class_mapping: Optional[Dict[int, int]] = None,
+                 auto_infer_reverse_mapping: bool = True):
         """
         Args:
             output_dir (str): 保存最终 .las 文件的目录
@@ -78,7 +104,10 @@ class SegmentationWriter(BasePredictionWriter):
             save_logits (bool): 是否同时保存 logits 到 .npz 文件 (用于后处理/集成)
             reverse_class_mapping (Optional[Dict[int, int]]): 将连续标签映射回原始标签
                                   例如: {0: 0, 1: 1, 2: 2, 3: 6, 4: 9}
-                                  如果为 None，则不应用映射
+                                  如果为 None 且 auto_infer_reverse_mapping=True，
+                                  将尝试从 DataModule.class_mapping 自动构建
+            auto_infer_reverse_mapping (bool): 是否自动从 DataModule 推断 reverse_class_mapping
+                                              默认 True。当 reverse_class_mapping=None 时生效
         """
         super().__init__(write_interval)
         self.output_dir = output_dir
@@ -86,83 +115,59 @@ class SegmentationWriter(BasePredictionWriter):
         self.num_classes = num_classes
         self.save_logits = save_logits
         self.reverse_class_mapping = reverse_class_mapping
+        self.auto_infer_reverse_mapping = auto_infer_reverse_mapping
+        self._mapping_inferred = False  # 标记是否已推断
         
         os.makedirs(self.output_dir, exist_ok=True)
         os.makedirs(self.temp_dir, exist_ok=True)
-
-    def _get_bin_pkl_path_from_indices(self, indices: torch.Tensor, trainer: 'pl.Trainer') -> Optional[str]:
+    
+    def on_predict_start(self, trainer: 'pl.Trainer', pl_module: 'pl.LightningModule'):
         """
-        从点索引反向推断对应的 bin/pkl 文件 (已弃用，保留作为后备方案)
+        预测开始时，尝试自动推断 reverse_class_mapping
         
-        ⚠️ 已弃用: 现在文件信息直接从 dataset 传递，无需推断。
-        此方法仅作为后备方案保留，用于处理旧格式数据。
-        
-        通过检查 dataset.data_list 来确定这些点属于哪个 bin 文件。
-        
-        Args:
-            indices: 点的原始索引 [N]
-            trainer: PyTorch Lightning Trainer
-            
-        Returns:
-            bin 文件的基础名称 (不带扩展名)，如果无法确定则返回 None
+        优先级：
+        1. 用户提供的 reverse_class_mapping（最高优先级）
+        2. 模型 checkpoint 中的 class_mapping（从 hparams 加载）
+        3. DataModule 中的 class_mapping
         """
+        # 如果用户已经提供了 reverse_class_mapping，跳过推断
+        if self.reverse_class_mapping is not None:
+            pl_module.print(f"[SegmentationWriter] 使用用户提供的 reverse_class_mapping: {self.reverse_class_mapping}")
+            return
+        
+        # 如果不需要自动推断，跳过
+        if not self.auto_infer_reverse_mapping:
+            return
+        
+        # 优先级 1: 尝试从模型 checkpoint 获取 class_mapping
         try:
-            dataset = trainer.predict_dataloaders.dataset
-            
-            # 获取第一个索引对应的样本信息
-            # 假设一个 batch 的所有点来自同一个 bin 文件
-            # (这在我们的数据结构中通常是成立的，因为每个 segment 来自一个 bin 文件)
-            
-            # 我们需要找到包含这些 indices 的 segment
-            # 由于 segment 的 indices 是离散的，我们检查第一个索引
-            first_idx = indices[0].item() if isinstance(indices[0], torch.Tensor) else indices[0]
-            
-            # 从 data_list 中找到包含该索引的 segment
-            for sample_info in dataset.data_list:
-                segment_indices = sample_info.get('indices', [])
-                if first_idx in segment_indices:
-                    bin_path = Path(sample_info['bin_path'])
-                    return bin_path.stem  # 返回文件名 (不带扩展名)
-            
-            # 如果没找到，使用 batch_idx 作为后备方案
-            return None
-            
+            if hasattr(pl_module, 'hparams') and hasattr(pl_module.hparams, 'class_mapping'):
+                class_mapping = pl_module.hparams.class_mapping
+                if class_mapping is not None:
+                    # 构建反向映射
+                    self.reverse_class_mapping = {v: k for k, v in class_mapping.items()}
+                    self._mapping_inferred = True
+                    pl_module.print(f"[SegmentationWriter] 自动加载 reverse_class_mapping 从模型 checkpoint:")
+                    pl_module.print(f"  - class_mapping: {class_mapping}")
+                    pl_module.print(f"  - reverse_class_mapping: {self.reverse_class_mapping}")
+                    return
         except Exception as e:
-            print(f"警告: 无法从 indices 推断 bin 文件: {e}")
-            return None
-
-    def _get_bin_info_from_sample(self, trainer: 'pl.Trainer', sample_idx: int = 0) -> Optional[Dict[str, Any]]:
-        """
-        从 dataset 获取 bin 文件信息
+            pl_module.print(f"[SegmentationWriter] 无法从模型加载 class_mapping: {e}")
         
-        Args:
-            trainer: PyTorch Lightning Trainer
-            sample_idx: 样本索引 (默认获取第一个)
-            
-        Returns:
-            包含 bin_path, pkl_path, bin_basename 等信息的字典
-        """
+        # 优先级 2: 尝试从 DataModule 获取 class_mapping
         try:
-            dataset = trainer.predict_dataloaders.dataset
-            
-            if sample_idx >= len(dataset.data_list):
-                sample_idx = 0
-                
-            sample_info = dataset.data_list[sample_idx]
-            
-            bin_path = Path(sample_info['bin_path'])
-            pkl_path = Path(sample_info['pkl_path'])
-            
-            return {
-                'bin_path': str(bin_path),
-                'pkl_path': str(pkl_path),
-                'bin_basename': bin_path.stem,
-            }
-            
+            datamodule = trainer.datamodule
+            if hasattr(datamodule, 'class_mapping') and datamodule.class_mapping is not None:
+                # 构建反向映射
+                self.reverse_class_mapping = {v: k for k, v in datamodule.class_mapping.items()}
+                self._mapping_inferred = True
+                pl_module.print(f"[SegmentationWriter] 自动推断 reverse_class_mapping 从 DataModule:")
+                pl_module.print(f"  - class_mapping: {datamodule.class_mapping}")
+                pl_module.print(f"  - reverse_class_mapping: {self.reverse_class_mapping}")
+            else:
+                pl_module.print(f"[SegmentationWriter] 未找到 class_mapping，预测结果将使用模型输出的连续标签")
         except Exception as e:
-            print(f"错误: 无法从 dataset 获取 bin 文件信息: {e}")
-            return None
-
+            pl_module.print(f"[SegmentationWriter] 警告: 无法推断 reverse_class_mapping: {e}")
 
     def write_on_batch_end(
         self, 
@@ -188,54 +193,74 @@ class SegmentationWriter(BasePredictionWriter):
             print(f"警告: predict_step 必须返回 'logits' 和 'indices'。跳过批次 {batch_idx}")
             return
         
-        # 1. 🔥 直接从 prediction 获取 bin 文件信息（由 dataset 提供）
-        if 'bin_file' in prediction and len(prediction['bin_file']) > 0:
-            # bin_file 是一个列表（collate_fn 可能会 stack 或保持为列表）
-            bin_files = prediction['bin_file']
-            
-            # 取第一个文件名（假设一个 batch 内的点来自同一个 bin 文件）
+        # 🔥 关键修改：支持 batch 内包含多个 bin 文件的点
+        # bin_file 是一个列表，每个点对应一个文件名
+        if 'bin_file' not in prediction or len(prediction['bin_file']) == 0:
+            print(f"警告: batch {batch_idx} 缺少 bin_file 信息，跳过")
+            return
+        
+        bin_files = prediction['bin_file']
+        logits = prediction['logits'].cpu()  # [N, C]
+        indices = prediction['indices'].cpu()  # [N]
+        
+        # 获取完整路径信息（如果可用）
+        bin_paths = prediction.get('bin_path', [None] * len(bin_files))
+        pkl_paths = prediction.get('pkl_path', [None] * len(bin_files))
+        
+        # 按 bin 文件分组点
+        # 使用字典记录每个文件的点：{bin_basename: {'logits': [], 'indices': [], 'bin_path': str, 'pkl_path': str}}
+        file_groups = defaultdict(lambda: {'logits': [], 'indices': [], 'bin_path': None, 'pkl_path': None})
+        
+        for i in range(len(bin_files)):
+            # 提取 bin_basename
             if isinstance(bin_files, list):
-                bin_basename = bin_files[0]
-            elif isinstance(bin_files, torch.Tensor):
-                # 如果被转换为 tensor，转回字符串
-                bin_basename = str(bin_files[0].item())
+                bin_basename = bin_files[i] if isinstance(bin_files[i], str) else str(bin_files[i])
             else:
-                bin_basename = str(bin_files)
-        else:
-            # 后备方案：使用旧的推断方法（不推荐，但保持兼容性）
-            indices = prediction['indices']
-            bin_basename = self._get_bin_pkl_path_from_indices(indices, trainer)
+                bin_basename = str(bin_files[i].item()) if hasattr(bin_files[i], 'item') else str(bin_files[i])
             
-            if bin_basename is None:
-                bin_basename = f"unknown_batch_{batch_idx}"
-                print(f"警告: 无法确定 batch {batch_idx} 对应的 bin 文件，使用 {bin_basename}")
+            # 去掉可能的扩展名
+            if bin_basename.endswith('.bin'):
+                bin_basename = bin_basename[:-4]
+            
+            # 累积该点的预测
+            file_groups[bin_basename]['logits'].append(logits[i])
+            file_groups[bin_basename]['indices'].append(indices[i])
+            
+            # 保存路径信息（所有来自同一文件的点共享路径）
+            if file_groups[bin_basename]['bin_path'] is None:
+                if isinstance(bin_paths, list) and i < len(bin_paths):
+                    file_groups[bin_basename]['bin_path'] = bin_paths[i]
+                if isinstance(pkl_paths, list) and i < len(pkl_paths):
+                    file_groups[bin_basename]['pkl_path'] = pkl_paths[i]
         
-        # 2. 定义临时文件名
-        tmp_filename = f"{bin_basename}_batch_{batch_idx}.pred.tmp"
-        save_path = os.path.join(self.temp_dir, tmp_filename)
-        
-        # 3. 保存预测结果到磁盘 (只保存必要信息)
-        save_dict = {
-            'logits': prediction['logits'].cpu(),      # [N, C]
-            'indices': prediction['indices'].cpu(),    # [N]
-            'bin_file': bin_basename,                  # 🔥 保存文件名
-        }
-        
-        # 🔥 保存完整路径信息（如果可用）
-        if 'bin_path' in prediction:
-            save_dict['bin_path'] = prediction['bin_path']
-        if 'pkl_path' in prediction:
-            save_dict['pkl_path'] = prediction['pkl_path']
-        
-        # 可选: 保存坐标用于调试
-        if 'coord' in prediction and self.save_logits:
-            save_dict['coord'] = prediction['coord'].cpu()
-        
-        torch.save(save_dict, save_path)
+        # 为每个文件保存临时文件
+        for bin_basename, data in file_groups.items():
+            # 堆叠该文件的所有点
+            file_logits = torch.stack(data['logits'], dim=0)  # [N_file, C]
+            file_indices = torch.stack(data['indices'], dim=0)  # [N_file]
+            
+            # 定义临时文件名
+            tmp_filename = f"{bin_basename}_batch_{batch_idx}.pred.tmp"
+            save_path = os.path.join(self.temp_dir, tmp_filename)
+            
+            # 保存预测结果到磁盘
+            save_dict = {
+                'logits': file_logits,
+                'indices': file_indices,
+                'bin_file': bin_basename,
+            }
+            
+            # 保存完整路径信息（如果可用）
+            if data['bin_path'] is not None:
+                save_dict['bin_path'] = data['bin_path']
+            if data['pkl_path'] is not None:
+                save_dict['pkl_path'] = data['pkl_path']
+            
+            torch.save(save_dict, save_path)
         
         # 可选: 打印进度
         if batch_idx % 10 == 0:
-            pl_module.print(f"[SegmentationWriter] 已保存 batch {batch_idx} 到 {tmp_filename}")
+            pl_module.print(f"[SegmentationWriter] Batch {batch_idx}: 保存了 {len(file_groups)} 个文件的预测")
 
     def on_predict_end(self, trainer: 'pl.Trainer', pl_module: 'pl.LightningModule'):
         """
@@ -252,7 +277,18 @@ class SegmentationWriter(BasePredictionWriter):
         # 如果 num_classes 未指定，从 Task 推断
         if self.num_classes == -1:
             try:
-                self.num_classes = pl_module.head.out_channels
+                # 尝试多种方式推断类别数
+                if hasattr(pl_module, 'head'):
+                    if hasattr(pl_module.head, 'out_channels'):
+                        self.num_classes = pl_module.head.out_channels
+                    elif hasattr(pl_module.head, 'num_classes'):
+                        self.num_classes = pl_module.head.num_classes
+                    else:
+                        raise AttributeError("head 没有 out_channels 或 num_classes 属性")
+                elif hasattr(pl_module, 'num_classes'):
+                    self.num_classes = pl_module.num_classes
+                else:
+                    raise AttributeError("无法找到 num_classes")
                 pl_module.print(f"[SegmentationWriter] 从模型推断类别数: {self.num_classes}")
             except Exception as e:
                 print(f"错误: 无法从模型推断 num_classes: {e}")
@@ -307,6 +343,16 @@ class SegmentationWriter(BasePredictionWriter):
                 print(f"警告: 无法删除临时文件 {tmp_file}: {e}")
         
         pl_module.print(f"[SegmentationWriter] 所有预测已保存到 {self.output_dir}")
+        
+        # 删除临时文件夹
+        try:
+            import shutil
+            if os.path.exists(self.temp_dir):
+                shutil.rmtree(self.temp_dir)
+                pl_module.print(f"[SegmentationWriter] 已清理临时文件夹: {self.temp_dir}")
+        except Exception as e:
+            pl_module.print(f"[SegmentationWriter] 警告: 清理临时文件夹失败: {e}")
+        
         pl_module.print("="*70)
     
     def _process_single_bin_file(
@@ -409,8 +455,18 @@ class SegmentationWriter(BasePredictionWriter):
         # 平均 logits
         mean_logits = logits_sum / counts.unsqueeze(-1)
         
-        # Argmax 获取类别
-        final_preds = torch.argmax(mean_logits, dim=1).numpy().astype(np.uint8)
+        # 🔥 新增：智能判断是否需要 argmax
+        # 如果 mean_logits 是 [N, C] 的 logits，则需要 argmax
+        # 如果 mean_logits 是 [N] 的 labels，则直接使用
+        if mean_logits.ndim == 2 and mean_logits.size(1) > 1:
+            # [N, C] logits -> argmax 获取类别
+            final_preds = torch.argmax(mean_logits, dim=1).numpy().astype(np.uint8)
+        elif mean_logits.ndim == 2 and mean_logits.size(1) == 1:
+            # [N, 1] -> squeeze 为 [N]
+            final_preds = mean_logits.squeeze(-1).numpy().astype(np.uint8)
+        else:
+            # [N] labels -> 直接使用
+            final_preds = mean_logits.numpy().astype(np.uint8)
         
         # 对未预测的点赋值 (使用 0 或 ignore_label)
         if unpredicted_mask.any():
@@ -434,7 +490,7 @@ class SegmentationWriter(BasePredictionWriter):
         ], axis=1).astype(np.float64)
         
         # 9. 保存为 .las 文件（包含所有原始属性）
-        final_las_path = os.path.join(self.output_dir, f"{bin_basename}_predicted.las")
+        final_las_path = os.path.join(self.output_dir, f"{bin_basename}.las")
         
         try:
             # 将 bin_path 添加到 metadata 中，方便 _save_las_file 加载原始数据

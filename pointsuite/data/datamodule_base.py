@@ -41,18 +41,27 @@ class DataModuleBase(pl.LightningDataModule, ABC):
     
     def __init__(
         self,
-        data_root: str,
-        train_files: Optional[List[str]] = None,
-        val_files: Optional[List[str]] = None,
-        test_files: Optional[List[str]] = None,
+        train_data: Optional[Any] = None,
+        val_data: Optional[Any] = None,
+        test_data: Optional[Any] = None,
+        predict_data: Optional[Any] = None,
         batch_size: int = 8,
         num_workers: int = 4,
         train_transforms: Optional[List] = None,
         val_transforms: Optional[List] = None,
         test_transforms: Optional[List] = None,
+        predict_transforms: Optional[List] = None,
+        train_loop: int = 1,
+        val_loop: int = 1,
+        test_loop: int = 1,
+        predict_loop: int = 1,
         use_dynamic_batch: bool = False,
         max_points: int = 500000,
+        use_dynamic_batch_inference: bool = False,
+        max_points_inference: Optional[int] = None,
+        use_weighted_sampler: bool = False,
         train_sampler_weights: Optional[List[float]] = None,
+        class_weights: Optional[Any] = None,
         pin_memory: bool = True,
         persistent_workers: bool = False,
         prefetch_factor: Optional[int] = 2,
@@ -62,21 +71,39 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         初始化 DataModuleBase
         
         参数：
-            data_root: 包含数据文件的根目录
-            train_files: 训练文件名列表。如果为 None，则从 data_root 自动发现
-            val_files: 验证文件名列表。如果为 None，则从 data_root 自动发现
-            test_files: 测试文件名列表。如果为 None，则从 data_root 自动发现
+            train_data: 训练数据路径，可以是:
+                       - 字符串：单个文件路径或包含多个文件的目录
+                       - 列表：文件路径列表（支持跨目录）
+                       - None：不使用训练数据
+            val_data: 验证数据路径（格式同 train_data）
+            test_data: 测试数据路径（格式同 train_data）
+            predict_data: 预测数据路径（格式同 train_data），如果为 None 则使用 test_data
             batch_size: DataLoader 的批次大小（当 use_dynamic_batch=True 时不使用）
             num_workers: 数据加载的工作进程数
             train_transforms: 训练数据的变换列表
             val_transforms: 验证数据的变换列表
             test_transforms: 测试数据的变换列表
-            use_dynamic_batch: 是否使用 DynamicBatchSampler（推荐用于内存控制）
+            predict_transforms: 预测数据的变换列表，如果为 None 则使用 test_transforms
+            train_loop: 训练数据集循环次数（数据增强）
+            val_loop: 验证数据集循环次数（Test-Time Augmentation）
+            test_loop: 测试数据集循环次数（Test-Time Augmentation）
+            predict_loop: 预测数据集循环次数（Test-Time Augmentation）
+            use_dynamic_batch: 是否在训练阶段使用 DynamicBatchSampler（推荐用于内存控制）
                               如果为 True，batch_size 参数将被忽略
-            max_points: 每个批次的最大点数（仅在 use_dynamic_batch=True 时使用）
-            train_sampler_weights: WeightedRandomSampler 的可选权重（仅用于训练）
-                                  如果提供，将为训练创建 WeightedRandomSampler
-                                  可与 use_dynamic_batch=True 一起使用
+            max_points: 训练阶段每个批次的最大点数（仅在 use_dynamic_batch=True 时使用）
+            use_dynamic_batch_inference: 是否在推理阶段（val/test/predict）使用 DynamicBatchSampler
+                                        默认为 False（与训练阶段独立）
+                                        推荐：大场景推理时设置为 True 以避免 OOM
+                                        注意：与 TTA (loop > 1) 一起使用时，点数基于 transform 前的值预计算
+                                              如果 transform 大幅增加点数（如密集采样），请谨慎使用
+            max_points_inference: 推理阶段每个批次的最大点数
+                                 如果为 None，则使用 max_points 的值
+                                 推荐：根据 GPU 内存设置（推理时通常可以比训练时更大）
+            use_weighted_sampler: 是否使用 WeightedRandomSampler（独立于 use_dynamic_batch）
+                                 如果为 True 且提供了 train_sampler_weights，将启用加权采样
+            train_sampler_weights: WeightedRandomSampler 的权重列表（仅用于训练）
+                                  长度必须等于 train_dataset 的实际长度（考虑 loop）
+                                  ⚠️ 不会保存到超参数中（数组太长）
             pin_memory: 是否在 DataLoader 中使用固定内存（更快的 GPU 传输）
             persistent_workers: 在 epoch 之间保持工作进程活动（更快但使用更多内存）
             prefetch_factor: 每个工作进程预取的批次数
@@ -85,13 +112,18 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         super().__init__()
         
         # 保存超参数（排除 transforms 和 weights 以避免序列化问题）
-        self.save_hyperparameters(ignore=['train_transforms', 'val_transforms', 'test_transforms', 'train_sampler_weights'])
+        self.save_hyperparameters(ignore=[
+            'train_transforms', 'val_transforms', 'test_transforms', 'predict_transforms',
+            # 'train_sampler_weights'  # weights 数组太长，不适合保存
+        ])
         
-        # 存储核心参数
-        self.data_root = Path(data_root)
-        self.train_files = train_files
-        self.val_files = val_files
-        self.test_files = test_files
+        # 存储数据路径（灵活支持文件/目录/列表）
+        self.train_data = train_data
+        self.val_data = val_data
+        self.test_data = test_data
+        self.predict_data = predict_data if predict_data is not None else test_data
+        
+        # 存储基本参数
         self.batch_size = batch_size
         self.num_workers = num_workers
         
@@ -99,11 +131,23 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         self.train_transforms = train_transforms
         self.val_transforms = val_transforms
         self.test_transforms = test_transforms
+        self.predict_transforms = predict_transforms if predict_transforms is not None else test_transforms
+        
+        # 存储循环参数（支持 Test-Time Augmentation）
+        self.train_loop = train_loop
+        self.val_loop = val_loop
+        self.test_loop = test_loop
+        self.predict_loop = predict_loop
         
         # 存储采样参数
         self.use_dynamic_batch = use_dynamic_batch
         self.max_points = max_points
+        # 推理阶段的动态 batch 设置（与训练阶段独立）
+        self.use_dynamic_batch_inference = use_dynamic_batch_inference
+        self.max_points_inference = max_points_inference if max_points_inference is not None else max_points
+        self.use_weighted_sampler = use_weighted_sampler
         self.train_sampler_weights = train_sampler_weights
+        self.class_weights = class_weights
         
         # 存储 DataLoader 参数
         self.pin_memory = pin_memory
@@ -120,10 +164,11 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         self.train_dataset = None
         self.val_dataset = None
         self.test_dataset = None
+        self.predict_dataset = None
         
-        # 验证
-        if not self.data_root.exists():
-            raise ValueError(f"数据根目录不存在: {self.data_root}")
+        # 验证：至少提供一个数据源
+        if all(x is None for x in [train_data, val_data, test_data, predict_data]):
+            raise ValueError("必须至少提供一个数据源（train_data/val_data/test_data/predict_data）")
     
     @abstractmethod
     def _create_dataset(self, data_paths, split: str, transforms):
@@ -163,83 +208,153 @@ class DataModuleBase(pl.LightningDataModule, ABC):
             stage: 当前阶段（'fit'、'validate'、'test'、'predict'，或 None 表示所有阶段）
         """
         # 设置训练数据集
-        if stage == 'fit' or stage is None:
-            if self.train_files is not None:
-                # 使用指定的文件
-                train_paths = [self.data_root / f for f in self.train_files]
-            else:
-                # 自动发现训练文件
-                train_paths = self.data_root
-            
+        if (stage == 'fit' or stage is None) and self.train_data is not None:
             self.train_dataset = self._create_dataset(
-                data_paths=train_paths,
+                data_paths=self.train_data,
                 split='train',
                 transforms=self.train_transforms
             )
+            
+            # 如果启用加权采样但未提供权重，则自动计算
+            if self.use_weighted_sampler and self.train_sampler_weights is None:
+                self.train_sampler_weights = self._compute_sample_weights(self.train_dataset)
+            
+            # 如果启用加权采样但未提供权重，则自动计算
+            if self.use_weighted_sampler and self.train_sampler_weights is None:
+                self.train_sampler_weights = self._compute_sample_weights(self.train_dataset)
         
         # 设置验证数据集
-        if stage == 'fit' or stage == 'validate' or stage is None:
-            if self.val_files is not None:
-                # 使用指定的文件
-                val_paths = [self.data_root / f for f in self.val_files]
-            else:
-                # 自动发现验证文件
-                val_paths = self.data_root
-            
+        if (stage == 'fit' or stage == 'validate' or stage is None) and self.val_data is not None:
             self.val_dataset = self._create_dataset(
-                data_paths=val_paths,
+                data_paths=self.val_data,
                 split='val',
                 transforms=self.val_transforms
             )
         
         # 设置测试数据集
-        if stage == 'test' or stage == 'predict' or stage is None:
-            if self.test_files is not None:
-                # 使用指定的文件
-                test_paths = [self.data_root / f for f in self.test_files]
-            else:
-                # 自动发现测试文件
-                test_paths = self.data_root
-            
+        if (stage == 'test' or stage is None) and self.test_data is not None:
             self.test_dataset = self._create_dataset(
-                data_paths=test_paths,
+                data_paths=self.test_data,
                 split='test',
                 transforms=self.test_transforms
             )
+        
+        # 设置预测数据集（独立于测试）
+        if (stage == 'predict' or stage is None) and self.predict_data is not None:
+            self.predict_dataset = self._create_dataset(
+                data_paths=self.predict_data,
+                split='predict',
+                transforms=self.predict_transforms
+            )
+    
+    def _compute_sample_weights(self, dataset):
+        """
+        自动计算训练样本权重
+        
+        参数：
+            dataset: 数据集实例
+            
+        返回：
+            样本权重列表（考虑 train_loop）
+        """
+        import torch
+        import numpy as np
+        
+        # 转换 class_weights 为字典
+        if self.class_weights is None:
+            # 从数据集自动计算类别权重
+            print("自动从数据集计算类别权重...")
+            class_weights_dict = dataset.compute_class_weights(
+                method='inverse',
+                smooth=1.0,
+                normalize=True
+            )
+            
+            if class_weights_dict is None:
+                print("警告: 数据集不支持自动类别权重计算，使用均匀权重")
+                return None
+            
+            print(f"计算的类别权重: {class_weights_dict}")
+        elif isinstance(self.class_weights, torch.Tensor):
+            class_weights_dict = {i: float(w) for i, w in enumerate(self.class_weights)}
+        elif isinstance(self.class_weights, dict):
+            class_weights_dict = self.class_weights
+        else:
+            print(f"警告: class_weights 类型不支持: {type(self.class_weights)}")
+            return None
+        
+        # 获取基础样本权重（不考虑 loop）
+        base_weights = dataset.get_sample_weights(class_weights_dict)
+        
+        if base_weights is None:
+            print("警告: 数据集不支持样本权重计算")
+            return None
+        
+        # 如果 train_loop > 1，重复权重
+        if self.train_loop > 1:
+            weights = np.tile(base_weights, self.train_loop)
+        else:
+            weights = base_weights
+        
+        print(f"计算样本权重:")
+        print(f"  - 基础样本数: {len(base_weights)}")
+        print(f"  - Train loop: {self.train_loop}")
+        print(f"  - 最终样本数: {len(weights)}")
+        print(f"  - 权重范围: [{weights.min():.4f}, {weights.max():.4f}]")
+        print(f"  - 权重均值: {weights.mean():.4f}")
+        
+        return weights.tolist()
     
     def _create_dataloader(
         self,
         dataset,
         shuffle: bool = False,
         drop_last: bool = False,
-        use_sampler_weights: bool = False
+        use_sampler_weights: bool = False,
+        use_dynamic_batch: Optional[bool] = None,
+        max_points: Optional[int] = None
     ) -> DataLoader:
         """
         创建具有适当设置的 DataLoader
         
         参数：
             dataset: 数据集实例
-            shuffle: 是否打乱数据（如果使用 batch_sampler 则忽略）
+            shuffle: 是否打乱数据（如果使用 sampler 则忽略）
             drop_last: 是否丢弃最后一个不完整的批次
             use_sampler_weights: 是否使用加权采样（仅用于训练）
+            use_dynamic_batch: 是否使用动态 batch（如果为 None 则使用实例默认值）
+            max_points: 最大点数（如果为 None 则使用实例默认值）
             
         返回：
             DataLoader 实例
         """
-        if self.use_dynamic_batch:
-            # 如果提供了权重并且被请求，则创建基础采样器
-            base_sampler = None
-            if use_sampler_weights and self.train_sampler_weights is not None:
-                base_sampler = WeightedRandomSampler(
-                    weights=self.train_sampler_weights,
-                    num_samples=len(dataset),
-                    replacement=True  # 使用有放回采样以支持过采样
+        # 使用传入的参数或实例默认值
+        _use_dynamic_batch = use_dynamic_batch if use_dynamic_batch is not None else self.use_dynamic_batch
+        _max_points = max_points if max_points is not None else self.max_points
+        # 创建基础采样器（仅用于训练）
+        # val/test/predict 必须访问所有样本，不使用 sampler
+        base_sampler = None
+        if use_sampler_weights and self.use_weighted_sampler and self.train_sampler_weights is not None:
+            # 验证 weights 长度与 dataset 长度匹配
+            if len(self.train_sampler_weights) != len(dataset):
+                raise ValueError(
+                    f"train_sampler_weights 长度 ({len(self.train_sampler_weights)}) "
+                    f"与 dataset 长度 ({len(dataset)}) 不匹配。\n"
+                    f"提示：如果使用 train_loop > 1，weights 需要重复 train_loop 次。\n"
+                    f"例如：weights = original_weights * train_loop"
                 )
             
-            # 创建 DynamicBatchSampler
+            base_sampler = WeightedRandomSampler(
+                weights=self.train_sampler_weights,
+                num_samples=len(dataset),
+                replacement=True  # 使用有放回采样以支持过采样
+            )
+        
+        if _use_dynamic_batch:
+            # 使用 DynamicBatchSampler（可以与 base_sampler 结合）
             batch_sampler = DynamicBatchSampler(
                 dataset=dataset,
-                max_points=self.max_points,
+                max_points=_max_points,
                 shuffle=(shuffle and base_sampler is None),  # 仅在没有 base_sampler 时打乱
                 drop_last=drop_last,
                 sampler=base_sampler
@@ -256,10 +371,12 @@ class DataModuleBase(pl.LightningDataModule, ABC):
             )
         else:
             # 使用标准的固定 batch_size
+            # 注意：如果有 base_sampler，则不能同时使用 shuffle
             return DataLoader(
                 dataset,
                 batch_size=self.batch_size,
-                shuffle=shuffle,
+                sampler=base_sampler,
+                shuffle=(shuffle and base_sampler is None),  # sampler 和 shuffle 互斥
                 num_workers=self.num_workers,
                 collate_fn=self.collate_fn,
                 pin_memory=self.pin_memory,
@@ -274,30 +391,45 @@ class DataModuleBase(pl.LightningDataModule, ABC):
             dataset=self.train_dataset,
             shuffle=True,
             drop_last=True,
-            use_sampler_weights=True  # 为训练启用加权采样
+            use_sampler_weights=True,  # 为训练启用加权采样
+            use_dynamic_batch=self.use_dynamic_batch,
+            max_points=self.max_points
         )
     
     def val_dataloader(self) -> DataLoader:
-        """创建并返回验证 DataLoader"""
+        """创建并返回验证 DataLoader（必须访问所有样本）"""
         return self._create_dataloader(
             dataset=self.val_dataset,
             shuffle=False,
             drop_last=False,
-            use_sampler_weights=False  # 验证不使用加权采样
+            use_sampler_weights=False,  # 验证不使用加权采样，必须访问所有样本
+            use_dynamic_batch=self.use_dynamic_batch_inference,
+            max_points=self.max_points_inference
         )
     
     def test_dataloader(self) -> DataLoader:
-        """创建并返回测试 DataLoader"""
+        """创建并返回测试 DataLoader（必须访问所有样本）"""
         return self._create_dataloader(
             dataset=self.test_dataset,
             shuffle=False,
             drop_last=False,
-            use_sampler_weights=False  # 测试不使用加权采样
+            use_sampler_weights=False,  # 测试不使用加权采样，必须访问所有样本
+            use_dynamic_batch=self.use_dynamic_batch_inference,
+            max_points=self.max_points_inference
         )
     
     def predict_dataloader(self) -> DataLoader:
-        """创建并返回预测 DataLoader（与测试相同）"""
-        return self.test_dataloader()
+        """创建并返回预测 DataLoader（必须访问所有样本）"""
+        # 如果有独立的 predict_dataset，使用它；否则回退到 test_dataset
+        dataset = self.predict_dataset if self.predict_dataset is not None else self.test_dataset
+        return self._create_dataloader(
+            dataset=dataset,
+            shuffle=False,
+            drop_last=False,
+            use_sampler_weights=False,  # 预测不使用加权采样，必须访问所有样本
+            use_dynamic_batch=self.use_dynamic_batch_inference,
+            max_points=self.max_points_inference
+        )
     
     def teardown(self, stage: Optional[str] = None):
         """
@@ -312,6 +444,8 @@ class DataModuleBase(pl.LightningDataModule, ABC):
             self.val_dataset = None
         elif stage == 'test':
             self.test_dataset = None
+        elif stage == 'predict':
+            self.predict_dataset = None
     
     def on_exception(self, exception: BaseException):
         """
@@ -330,7 +464,7 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         获取数据集划分的信息
         
         参数：
-            split: 数据集划分（'train'、'val'、'test'）
+            split: 数据集划分（'train'、'val'、'test'、'predict'）
             
         返回：
             包含数据集信息的字典
@@ -341,6 +475,8 @@ class DataModuleBase(pl.LightningDataModule, ABC):
             dataset = self.val_dataset
         elif split == 'test' and self.test_dataset is not None:
             dataset = self.test_dataset
+        elif split == 'predict' and self.predict_dataset is not None:
+            dataset = self.predict_dataset
         else:
             raise ValueError(f"划分 '{split}' 的数据集未初始化。请先调用 setup()")
         
@@ -369,18 +505,25 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         print("=" * 60)
         print(f"{self.__class__.__name__} 信息")
         print("=" * 60)
-        print(f"数据根目录: {self.data_root}")
+        print(f"训练数据: {self.train_data}")
+        print(f"验证数据: {self.val_data}")
+        print(f"测试数据: {self.test_data}")
+        print(f"预测数据: {self.predict_data}")
         print(f"使用动态批次: {self.use_dynamic_batch}")
         if self.use_dynamic_batch:
             print(f"每批次最大点数: {self.max_points}")
-            print(f"加权采样: {'是' if self.train_sampler_weights is not None else '否'}")
         else:
             print(f"批次大小: {self.batch_size}")
+        print(f"使用加权采样: {self.use_weighted_sampler}")
+        if self.use_weighted_sampler:
+            print(f"权重已提供: {'是' if self.train_sampler_weights is not None else '否'}")
+            if self.train_sampler_weights is not None:
+                print(f"权重数量: {len(self.train_sampler_weights)}")
         print(f"工作进程数: {self.num_workers}")
         print(f"合并函数: {self.collate_fn.__name__ if hasattr(self.collate_fn, '__name__') else type(self.collate_fn).__name__}")
         print("-" * 60)
         
-        for split in ['train', 'val', 'test']:
+        for split in ['train', 'val', 'test', 'predict']:
             try:
                 info = self.get_dataset_info(split)
                 print(f"{split.upper()} 数据集:")
