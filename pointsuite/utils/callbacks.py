@@ -193,70 +193,85 @@ class SegmentationWriter(BasePredictionWriter):
             print(f"警告: predict_step 必须返回 'logits' 和 'indices'。跳过批次 {batch_idx}")
             return
         
-        # 🔥 关键修改：支持 batch 内包含多个 bin 文件的点
-        # bin_file 是一个列表，每个点对应一个文件名
         if 'bin_file' not in prediction or len(prediction['bin_file']) == 0:
             print(f"警告: batch {batch_idx} 缺少 bin_file 信息，跳过")
             return
         
-        bin_files = prediction['bin_file']
-        logits = prediction['logits'].cpu()  # [N, C]
-        indices = prediction['indices'].cpu()  # [N]
+        # 1. 获取基础数据
+        bin_files = prediction['bin_file']  # List[str], 长度 = Batch Size
+        logits = prediction['logits'].cpu()  # [Total_Points, C]
+        indices = prediction['indices'].cpu()  # [Total_Points]
         
         # 获取完整路径信息（如果可用）
         bin_paths = prediction.get('bin_path', [None] * len(bin_files))
         pkl_paths = prediction.get('pkl_path', [None] * len(bin_files))
         
-        # 按 bin 文件分组点
-        # 使用字典记录每个文件的点：{bin_basename: {'logits': [], 'indices': [], 'bin_path': str, 'pkl_path': str}}
+        # 2. 🔥 关键修复：获取 offset 信息来正确切分数据
+        # batch['offset'] 是累积点数: [n1, n1+n2, n1+n2+n3, ...]
+        if 'offset' in batch:
+            offsets = batch['offset'].cpu().numpy()
+        else:
+            # 如果没有 offset，假设 batch_size=1，所有点属于同一个文件
+            offsets = [len(logits)]
+        
+        # 3. 按样本切分并分组
         file_groups = defaultdict(lambda: {'logits': [], 'indices': [], 'bin_path': None, 'pkl_path': None})
         
-        for i in range(len(bin_files)):
-            # 提取 bin_basename
+        start_idx = 0
+        for i, end_idx in enumerate(offsets):
+            # 获取当前样本的文件名
             if isinstance(bin_files, list):
                 bin_basename = bin_files[i] if isinstance(bin_files[i], str) else str(bin_files[i])
             else:
-                bin_basename = str(bin_files[i].item()) if hasattr(bin_files[i], 'item') else str(bin_files[i])
+                # 处理可能的单样本情况
+                bin_basename = str(bin_files)
             
-            # 去掉可能的扩展名
             if bin_basename.endswith('.bin'):
                 bin_basename = bin_basename[:-4]
             
-            # 累积该点的预测
-            file_groups[bin_basename]['logits'].append(logits[i])
-            file_groups[bin_basename]['indices'].append(indices[i])
+            # 🔥 关键修复：使用切片获取该样本的所有点
+            sample_logits = logits[start_idx:end_idx]
+            sample_indices = indices[start_idx:end_idx]
             
-            # 保存路径信息（所有来自同一文件的点共享路径）
+            # 累积数据
+            file_groups[bin_basename]['logits'].append(sample_logits)
+            file_groups[bin_basename]['indices'].append(sample_indices)
+            
+            # 保存路径信息
             if file_groups[bin_basename]['bin_path'] is None:
                 if isinstance(bin_paths, list) and i < len(bin_paths):
                     file_groups[bin_basename]['bin_path'] = bin_paths[i]
                 if isinstance(pkl_paths, list) and i < len(pkl_paths):
                     file_groups[bin_basename]['pkl_path'] = pkl_paths[i]
+            
+            # 更新起始位置
+            start_idx = end_idx
         
-        # 为每个文件保存临时文件
+        # 4. 保存临时文件
         for bin_basename, data in file_groups.items():
-            # 堆叠该文件的所有点
-            file_logits = torch.stack(data['logits'], dim=0)  # [N_file, C]
-            file_indices = torch.stack(data['indices'], dim=0)  # [N_file]
-            
-            # 定义临时文件名
-            tmp_filename = f"{bin_basename}_batch_{batch_idx}.pred.tmp"
-            save_path = os.path.join(self.temp_dir, tmp_filename)
-            
-            # 保存预测结果到磁盘
-            save_dict = {
-                'logits': file_logits,
-                'indices': file_indices,
-                'bin_file': bin_basename,
-            }
-            
-            # 保存完整路径信息（如果可用）
-            if data['bin_path'] is not None:
-                save_dict['bin_path'] = data['bin_path']
-            if data['pkl_path'] is not None:
-                save_dict['pkl_path'] = data['pkl_path']
-            
-            torch.save(save_dict, save_path)
+            # 拼接该文件在这个 batch 中的所有片段（如果有多个）
+            if len(data['logits']) > 0:
+                file_logits = torch.cat(data['logits'], dim=0)
+                file_indices = torch.cat(data['indices'], dim=0)
+                
+                # 定义临时文件名
+                tmp_filename = f"{bin_basename}_batch_{batch_idx}.pred.tmp"
+                save_path = os.path.join(self.temp_dir, tmp_filename)
+                
+                # 保存预测结果到磁盘
+                save_dict = {
+                    'logits': file_logits,
+                    'indices': file_indices,
+                    'bin_file': bin_basename,
+                }
+                
+                # 保存完整路径信息（如果可用）
+                if data['bin_path'] is not None:
+                    save_dict['bin_path'] = data['bin_path']
+                if data['pkl_path'] is not None:
+                    save_dict['pkl_path'] = data['pkl_path']
+                
+                torch.save(save_dict, save_path)
         
         # 可选: 打印进度
         if batch_idx % 10 == 0:
@@ -474,12 +489,35 @@ class SegmentationWriter(BasePredictionWriter):
             pl_module.print(f"    警告: {num_unpredicted} 个点未被预测，将赋予标签 0")
             final_preds[unpredicted_mask.numpy()] = 0
         
+        # 🔥 调试：打印映射前的类别分布
+        pl_module.print(f"  - 映射前类别分布（连续标签 0-{self.num_classes-1}）:")
+        pred_counts = np.bincount(final_preds, minlength=self.num_classes)
+        for i, count in enumerate(pred_counts):
+            if count > 0:
+                pl_module.print(f"    类别 {i}: {count:8d} 点 ({count/len(final_preds)*100:5.2f}%)")
+        
         # 7. 应用反向类别映射 (如果有)
         if self.reverse_class_mapping is not None:
-            pl_module.print(f"  - 应用反向类别映射...")
-            final_preds_mapped = np.zeros_like(final_preds)
+            pl_module.print(f"  - 应用反向类别映射: {self.reverse_class_mapping}")
+            
+            # 🔥 修复：使用向量化映射，避免 np.zeros_like 的bug
+            # 创建映射数组（索引 = 连续标签，值 = 原始标签）
+            max_continuous_label = max(self.reverse_class_mapping.keys())
+            mapping_array = np.arange(max_continuous_label + 1)  # 默认保持不变
+            
             for continuous_label, original_label in self.reverse_class_mapping.items():
-                final_preds_mapped[final_preds == continuous_label] = original_label
+                mapping_array[continuous_label] = original_label
+            
+            # 向量化映射
+            final_preds_mapped = mapping_array[final_preds]
+            
+            # 🔥 调试：打印映射后的类别分布
+            pl_module.print(f"  - 映射后类别分布（原始标签）:")
+            unique_labels = np.unique(final_preds_mapped)
+            for label in unique_labels:
+                count = (final_preds_mapped == label).sum()
+                pl_module.print(f"    标签 {label}: {count:8d} 点 ({count/len(final_preds_mapped)*100:5.2f}%)")
+            
             final_preds = final_preds_mapped
         
         # 8. 提取坐标 (XYZ)

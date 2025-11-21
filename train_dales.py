@@ -66,20 +66,20 @@ def main():
     IGNORE_LABEL = -1
     
     # 训练
-    MAX_EPOCHS = 5
+    MAX_EPOCHS = 2
     BATCH_SIZE = 4
-    NUM_WORKERS = 4  # 多进程数据加载，加速训练和推理
+    NUM_WORKERS = 0  # 多进程数据加载，加速训练和推理
     LEARNING_RATE = 0.001
-    MAX_POINTS = 250000
-    MAX_POINTS_INFERENCE = 500000  # 推理时使用更大batch（无梯度，显存占用少）
+    MAX_POINTS = 80000
+    MAX_POINTS_INFERENCE = 200000  # 推理时使用更大batch（无梯度，显存占用少）
     ACCUMULATE_GRAD_BATCHES = 4  # 梯度累积：每4个batch更新一次参数，模拟更大batch
     
     pl.seed_everything(42)
     
-    if torch.cuda.is_available():
-        torch.set_float32_matmul_precision('high')
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+    # if torch.cuda.is_available():
+    #     torch.set_float32_matmul_precision('high')
+    #     torch.backends.cuda.matmul.allow_tf32 = True
+    #     torch.backends.cudnn.allow_tf32 = True
     
     print("\n" + "=" * 80)
     print(f"DALES 语义分割训练 - {NUM_CLASSES} 类")
@@ -235,7 +235,8 @@ def main():
     callbacks = [
         ModelCheckpoint(monitor='mean_iou', mode='max', save_top_k=3,
                        filename='dales-{epoch:02d}-{mean_iou:.4f}', verbose=True),
-        EarlyStopping(monitor='mean_iou', patience=20, mode='max', verbose=True),
+        EarlyStopping(monitor='mean_iou', patience=20, mode='max', verbose=True, 
+                     check_on_train_epoch_end=False),  # 🔥 修复：在验证结束时检查，而不是训练结束时
         LearningRateMonitor(logging_interval='step'),
         SegmentationWriter(output_dir=OUTPUT_DIR, save_logits=False, auto_infer_reverse_mapping=True),
         CustomProgressBar(refresh_rate=1),  # 自定义进度条
@@ -247,7 +248,7 @@ def main():
         max_epochs=MAX_EPOCHS,
         devices=1,
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
-        precision="32-true",
+        precision="16-mixed",
         log_every_n_steps=10,
         default_root_dir='./outputs/dales',
         logger=[csv_logger],

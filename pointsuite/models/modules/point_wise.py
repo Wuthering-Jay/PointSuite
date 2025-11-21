@@ -206,7 +206,74 @@ class PointNetLayer(nn.Module):
     
 
  # ———— 池化层 ————
+
+ # ... (之前的导入保持不变)
+
 class GridPool(nn.Module):
+    """
+    Partition-based Pooling (Grid Pooling)
+    """
+    def __init__(self, in_channels, out_channels, grid_size, bias=False):
+        super(GridPool, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.grid_size = grid_size
+
+        self.fc = nn.Linear(in_channels, out_channels, bias=bias)
+        self.norm = PointBatchNorm(out_channels)
+        self.act = nn.ReLU(inplace=True)
+
+    def forward(self, points, start=None):
+        """
+        input: points: [pxo], [[n,3],[n,c],[b]], start: [b, 3]
+        output: points: [pxo], [[v,3],[v,c],[b]], cluster: [n]
+        """
+        coord, feat, offset = points
+        batch = offset2batch(offset)
+        
+        # 1. 确保 feat 计算在自动混合精度下进行
+        feat = self.act(self.norm(self.fc(feat)))
+        
+        # 2. 坐标计算必须使用 FP32 (voxel_grid 要求)
+        coord_fp32 = coord.float()
+        
+        with torch.no_grad():
+            start = (
+                segment_csr(
+                    coord_fp32,
+                    torch.cat([batch.new_zeros(1), torch.cumsum(batch.bincount(), dim=0)]),
+                    reduce="min",
+                )
+                if start is None
+                else start
+            )
+        
+        cluster = voxel_grid(
+            pos=coord_fp32 - start[batch], size=self.grid_size, batch=batch, start=0
+        )
+        unique, cluster, counts = torch.unique(
+            cluster, sorted=True, return_inverse=True, return_counts=True
+        )
+        
+        # 获取排序索引
+        _, sorted_cluster_indices = torch.sort(cluster)
+        idx_ptr = torch.cat([counts.new_zeros(1), torch.cumsum(counts, dim=0)])
+        
+        # 3. 池化操作
+        coord = segment_csr(coord_fp32[sorted_cluster_indices], idx_ptr, reduce="mean")
+        feat = segment_csr(feat[sorted_cluster_indices], idx_ptr, reduce="max")
+        
+        # 4. [逻辑修复] 正确更新 batch
+        batch = batch[sorted_cluster_indices][idx_ptr[:-1]]
+        
+        # 5. [类型修复] 强制转换为 int32 !!!
+        # batch2offset 默认返回 long，必须转为 int()
+        offset = batch2offset(batch).int()
+        
+        return [coord, feat, offset], cluster
+
+        
+class GridPool1(nn.Module):
     """
     Partition-based Pooling (Grid Pooling)
     格网池化，基于体素划分进行池化下采样，体素内坐标平均池化，特征最大池化，得到新的pxo，同时输出体素索引
@@ -218,7 +285,7 @@ class GridPool(nn.Module):
     """
 
     def __init__(self, in_channels, out_channels, grid_size, bias=False):
-        super(GridPool, self).__init__()
+        super(GridPool1, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.grid_size = grid_size

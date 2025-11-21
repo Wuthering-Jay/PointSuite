@@ -99,9 +99,16 @@ class BlockSequence(nn.Module):
 
     def forward(self, points):
         coord, feat, offset = points 
+        
+        # [新增] 防御性编程：确保 offset 是 int32
+        if offset.dtype != torch.int32:
+            offset = offset.int()
+            
         with torch.no_grad():
             # pointops.knn_query 需要 FP32 坐标
             coord_fp32 = coord.float() if coord.dtype == torch.float16 else coord
+            
+            # offset 必须是 int32，否则 CUDA 读取越界
             reference_index, _ = pointops.knn_query(self.neighbours, coord_fp32, offset)
         
         for block in self.blocks:

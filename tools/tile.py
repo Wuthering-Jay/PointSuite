@@ -963,7 +963,7 @@ if __name__ == "__main__":
     grid_size = 0.5  # 🔥 设置grid size启用grid sampling
     max_loops = 10  # 🔥 grid size开启时的最大采样循环次数（避免极端情况）
     shuffle_points = True  # 🔥 打乱体素内点顺序（提高随机性）
-    max_workers = None  # 自动检测CPU核心数
+    max_workers = 8  # 自动检测CPU核心数
     ground_class = None  # 🔥 地面点的classification值（None则不生成is_ground字段）
     
     # 处理文件（并行处理在单个LAS文件内部进行）

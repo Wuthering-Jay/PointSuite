@@ -558,6 +558,19 @@ class BaseTask(pl.LightningModule):
                         
                         print(f"  {'-'*15}  {'-'*8}  {'-'*10}  {'-'*8}  {'-'*10}")
                         print(f"  {'Mean':15s}  {current_miou:8.4f}  {mean_precision:10.4f}  {mean_recall:8.4f}  {mean_f1:10.4f}")
+                        print(f"{'='*100}")
+                        
+                        # 🔥 新增：打印预测类别分布（用于对比 predict 阶段）
+                        print(f"\nTest 阶段预测类别分布（连续标签 0-{len(per_class_iou)-1}）:")
+                        pred_distribution = confmat.sum(axis=0)  # 每个类别被预测的次数
+                        total_points = pred_distribution.sum()
+                        for i in range(len(pred_distribution)):
+                            count = int(pred_distribution[i])
+                            percentage = count / total_points * 100 if total_points > 0 else 0
+                            if class_names:
+                                print(f"  类别 {i} ({class_names[i]:10s}): {count:8d} 点 ({percentage:5.2f}%)")
+                            else:
+                                print(f"  类别 {i}: {count:8d} 点 ({percentage:5.2f}%)")
                         print(f"{'='*100}\n")
                 except Exception as e:
                     print(f"警告: 无法打印详细指标: {e}")
