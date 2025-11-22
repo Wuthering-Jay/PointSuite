@@ -12,7 +12,7 @@ from itertools import chain
 @torch.no_grad()
 def offset2bincount(offset):
     return torch.diff(
-        offset, prepend=torch.tensor([0], device=offset.device, dtype=torch.long)
+        offset, prepend=torch.tensor([0], device=offset.device, dtype=torch.int)
     )
 
 
@@ -25,13 +25,13 @@ def bincount2offset(bincount):
 def offset2batch(offset):
     bincount = offset2bincount(offset)
     return torch.arange(
-        len(bincount), device=offset.device, dtype=torch.long
+        len(bincount), device=offset.device, dtype=torch.int
     ).repeat_interleave(bincount)
 
 
 @torch.no_grad()
 def batch2offset(batch):
-    return torch.cumsum(batch.bincount(), dim=0).long()
+    return torch.cumsum(batch.bincount(), dim=0).int()
 
 
 def off_diagonal(x):

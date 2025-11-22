@@ -1,3 +1,10 @@
+import os
+
+# 限制线程数，避免小任务的线程调度开销（维持之前的优化）
+os.environ['NUMBA_NUM_THREADS'] = '8'
+os.environ['MKL_NUM_THREADS'] = '8'
+os.environ['OMP_NUM_THREADS'] = '8'
+
 import numpy as np
 import laspy
 import pickle
@@ -208,7 +215,7 @@ class GridSampler:
         key = ravel_hash_vec_numba(grid_coord, arr_min, arr_max)
         
         # 4. Sort by hash key
-        idx_sort = np.argsort(key)
+        idx_sort = np.argsort(key, kind='mergesort')
         key_sort = key[idx_sort]
         
         # 5. Get unique keys and counts
@@ -460,29 +467,40 @@ class LASProcessorToBinWithGridSample:
         """
         import time
         
-        # 1. 窗口分组
+       # 1. 窗口分组 (优化版：使用 argsort 代替 where 循环)
         t0 = time.time()
-        min_x, min_y = np.min(points[:, 0]), np.min(points[:, 1])
-        max_x, max_y = np.max(points[:, 0]), np.max(points[:, 1])
         x_size, y_size = self.window_size
         
-        # 应用偏移
+        # 计算原点
+        min_x, min_y = np.min(points[:, 0]), np.min(points[:, 1])
         origin_x = min_x - offset_x
         origin_y = min_y - offset_y
         
-        num_windows_x = max(1, int(np.ceil((max_x - origin_x) / x_size)))
-        num_windows_y = max(1, int(np.ceil((max_y - origin_y) / y_size)))
+        # 计算窗口索引
+        # 优化：直接计算 long 型索引，不计算 num_windows，避免溢出风险
+        x_bins = ((points[:, 0] - origin_x) / x_size).astype(np.int64)
+        y_bins = ((points[:, 1] - origin_y) / y_size).astype(np.int64)
         
-        # 计算每个点所属的窗口索引
-        x_bins = np.clip(((points[:, 0] - origin_x) / x_size).astype(int), 0, num_windows_x - 1)
-        y_bins = np.clip(((points[:, 1] - origin_y) / y_size).astype(int), 0, num_windows_y - 1)
+        # 使用 cantor pairing 或类似的 hash 方式组合二维索引，或者简单的字符串组合（慢）
+        # 这里为了速度，假设 y_bins 范围不会太大，使用大数乘法组合
+        # 假设 y 方向不会超过 1,000,000 个 grid
+        y_multiplier = 1000000
+        window_ids = x_bins * y_multiplier + y_bins
         
-        # 组合窗口索引
-        window_ids = x_bins * num_windows_y + y_bins
+        # 🚀 核心优化：使用 argsort 一次性分组，避免 N 次全量扫描
+        sort_idx = np.argsort(window_ids)
+        sorted_window_ids = window_ids[sort_idx]
         
-        # 分组
-        unique_ids, indices = np.unique(window_ids, return_inverse=True)
-        segments = [np.where(indices == i)[0] for i in range(len(unique_ids))]
+        # 找到切分点
+        unique_ids, split_indices = np.unique(sorted_window_ids, return_index=True)
+        # split_indices[0] 是 0，我们需要的切分点是 split_indices[1:]
+        # np.split 会返回列表
+        segments = np.split(sort_idx, split_indices[1:])
+        
+        # 过滤空 segment (np.unique 保证了 unique_ids 对应存在的 segments，通常不需要过滤，但 split 会产生第一个空如果索引0有值)
+        # np.unique return_index 返回的是每个唯一值第一次出现的索引
+        # 实际 segments 应该是 [split_indices[i]:split_indices[i+1]]
+        
         t1 = time.time()
         print(f"       - 窗口分组: {t1-t0:.3f}s → {len(segments)} 窗口")
         
@@ -815,35 +833,34 @@ class LASProcessorToBinWithGridSample:
         # 3. 收集每个分块的信息
         t0 = time.time()
         segments_info = []
+        
+        # 优化：预先获取 numpy 数组，避免在循环中反复访问 las_data 属性（可能触发 getter 开销）
+        # 注意：使用 points 数组（如果之前已经有了）或者从 las_data 提取
+        # 这里直接使用 las_data 的数组引用
+        lx, ly, lz = las_data.x, las_data.y, las_data.z
+        
         for i, segment_indices in enumerate(segments):
             segment_info = {
                 'segment_id': i,
-                'indices': segment_indices,  # 在bin文件中的索引
+                'indices': segment_indices,
                 'num_points': len(segment_indices),
-                # 🔥 新增：添加所属文件信息，用于 predict 时直接获取
-                'bin_file': base_name,  # bin 文件名（不带扩展名）
-                'bin_path': str(bin_path),  # 完整 bin 路径
-                'pkl_path': str(pkl_path),  # 完整 pkl 路径
+                'bin_file': base_name,
+                'bin_path': str(bin_path),
+                'pkl_path': str(pkl_path),
             }
             
-            # 统计该分块中的类别信息
-            if has_classification:
-                segment_labels = las_data.classification[segment_indices]
-                unique_segment_labels, segment_counts = np.unique(segment_labels, return_counts=True)
-                segment_label_counts = {int(label): int(count) for label, count in zip(unique_segment_labels, segment_counts)}
-                segment_info['unique_labels'] = [int(label) for label in unique_segment_labels]
-                segment_info['label_counts'] = segment_label_counts
-            else:
-                segment_info['unique_labels'] = [0]
-                segment_info['label_counts'] = {0: len(segment_indices)}
+            # 优化：提取当前 segment 的坐标子集，只做一次切片
+            seg_x = lx[segment_indices]
+            seg_y = ly[segment_indices]
+            seg_z = lz[segment_indices]
             
-            # 计算分块的边界信息 - 直接从原始las_data获取
-            segment_info['x_min'] = float(np.min(las_data.x[segment_indices]))
-            segment_info['x_max'] = float(np.max(las_data.x[segment_indices]))
-            segment_info['y_min'] = float(np.min(las_data.y[segment_indices]))
-            segment_info['y_max'] = float(np.max(las_data.y[segment_indices]))
-            segment_info['z_min'] = float(np.min(las_data.z[segment_indices]))
-            segment_info['z_max'] = float(np.max(las_data.z[segment_indices]))
+            # 计算边界（使用子集计算，快得多）
+            segment_info['x_min'] = float(np.min(seg_x))
+            segment_info['x_max'] = float(np.max(seg_x))
+            segment_info['y_min'] = float(np.min(seg_y))
+            segment_info['y_max'] = float(np.max(seg_y))
+            segment_info['z_min'] = float(np.min(seg_z))
+            segment_info['z_max'] = float(np.max(seg_z))
             
             segments_info.append(segment_info)
         
@@ -958,9 +975,9 @@ if __name__ == "__main__":
     output_dir = r"E:\data\DALES\dales_las\bin\test"
     window_size = (50.0, 50.0)
     min_points = 4096 * 5
-    max_points = 4096 * 10
-    overlap = True
-    grid_size = 0.5  # 🔥 设置grid size启用grid sampling
+    max_points = 4096 * 16 * 4
+    overlap = False
+    grid_size = None  # 🔥 设置grid size启用grid sampling
     max_loops = 10  # 🔥 grid size开启时的最大采样循环次数（避免极端情况）
     shuffle_points = True  # 🔥 打乱体素内点顺序（提高随机性）
     max_workers = 8  # 自动检测CPU核心数

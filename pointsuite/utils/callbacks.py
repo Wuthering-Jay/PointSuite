@@ -8,6 +8,9 @@ from pytorch_lightning.callbacks import BasePredictionWriter
 from typing import List, Any, Dict, Optional
 from pathlib import Path
 from collections import defaultdict
+import time
+from pytorch_lightning.callbacks import Callback
+
 
 # 导入 laspy (您需要 'pip install laspy')
 try:
@@ -767,3 +770,76 @@ class SegmentationWriter(BasePredictionWriter):
             import traceback
             traceback.print_exc()
             raise
+
+class AutoEmptyCacheCallback(Callback):
+    """
+    自动显存清理回调函数
+    
+    功能：
+    1. 监控训练速度，当检测到 Batch 耗时异常增加（可能触发了共享显存）时，执行 empty_cache
+    2. 支持定期间隔清理（可选）
+    """
+    def __init__(
+        self, 
+        slowdown_threshold: float = 3.0,  # 阈值：如果当前batch耗时超过平均值的 N 倍，则触发
+        clear_interval: int = 0,          # 兜底：每 N 个 batch 强制清理一次 (0表示禁用)
+        warmup_steps: int = 50,           # 预热：前 N 步不检测，让平均时间稳定
+        verbose: bool = True
+    ):
+        super().__init__()
+        self.slowdown_threshold = slowdown_threshold
+        self.clear_interval = clear_interval
+        self.warmup_steps = warmup_steps
+        self.verbose = verbose
+        
+        self._start_time = 0.0
+        self._avg_time = 0.0
+        self._alpha = 0.05  # 平滑系数 (EMA)
+        self._last_clear_step = 0
+
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+        # 记录开始时间
+        self._start_time = time.time()
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        # 计算当前 batch 耗时
+        duration = time.time() - self._start_time
+        
+        should_clear = False
+        reason = ""
+
+        # 1. 策略一：定期清理 (兜底)
+        if self.clear_interval > 0 and (batch_idx + 1) % self.clear_interval == 0:
+            should_clear = True
+            reason = "periodic"
+
+        # 2. 策略二：智能检测速度变慢
+        # 仅在预热后，且当前耗时远超平均值时触发
+        elif (batch_idx > self.warmup_steps and 
+              self._avg_time > 0 and 
+              duration > self._avg_time * self.slowdown_threshold):
+            
+            # 防止连续触发 (至少间隔 5 个 batch)
+            if batch_idx - self._last_clear_step > 5:
+                should_clear = True
+                reason = f"slowdown detected ({duration:.2f}s vs avg {self._avg_time:.2f}s)"
+
+        # 执行清理
+        if should_clear:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                # 可选：同步一下以确保清理完成，但这会增加一点点耗时
+                # torch.cuda.synchronize() 
+                
+                self._last_clear_step = batch_idx
+                if self.verbose:
+                    # 打印提示（使用 rank_zero_print 避免多卡重复打印）
+                    trainer.print(f"\n[AutoCache] 🧹 CUDA cache cleared at step {batch_idx}. Reason: {reason}")
+        
+        # 更新移动平均耗时 (EMA)
+        # 如果发生了清理，当前 batch 耗时可能不准确（包含了 swap 时间），可以选择不更新或小权重更新
+        # 这里我们选择正常更新，以便适应整体变慢的情况
+        if self._avg_time == 0:
+            self._avg_time = duration
+        else:
+            self._avg_time = self._avg_time * (1 - self._alpha) + duration * self._alpha

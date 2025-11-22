@@ -104,11 +104,15 @@ class BlockSequence(nn.Module):
         if offset.dtype != torch.int32:
             offset = offset.int()
             
+        # 2. 确保 coord 是 FP32 且连续
+        # 混合精度下 coord 可能会变成 FP16，这在几何计算中是危险的
+        coord_fp32 = coord.float().contiguous()
+        
+        # 3. 确保 feat 连续 (类型可以是 FP16)
+        if not feat.is_contiguous():
+            feat = feat.contiguous()
+
         with torch.no_grad():
-            # pointops.knn_query 需要 FP32 坐标
-            coord_fp32 = coord.float() if coord.dtype == torch.float16 else coord
-            
-            # offset 必须是 int32，否则 CUDA 读取越界
             reference_index, _ = pointops.knn_query(self.neighbours, coord_fp32, offset)
         
         for block in self.blocks:

@@ -234,7 +234,7 @@ class GridPool(nn.Module):
         # 1. 确保 feat 计算在自动混合精度下进行
         feat = self.act(self.norm(self.fc(feat)))
         
-        # 2. 坐标计算必须使用 FP32 (voxel_grid 要求)
+        # 2. 坐标计算必须使用 FP32
         coord_fp32 = coord.float()
         
         with torch.no_grad():
@@ -263,11 +263,10 @@ class GridPool(nn.Module):
         coord = segment_csr(coord_fp32[sorted_cluster_indices], idx_ptr, reduce="mean")
         feat = segment_csr(feat[sorted_cluster_indices], idx_ptr, reduce="max")
         
-        # 4. [逻辑修复] 正确更新 batch
+        # 🔥 [修复 1] 正确更新 batch 索引 (先重排再切片)
         batch = batch[sorted_cluster_indices][idx_ptr[:-1]]
         
-        # 5. [类型修复] 强制转换为 int32 !!!
-        # batch2offset 默认返回 long，必须转为 int()
+        # 🔥 [修复 2] 强制 offset 为 int32 !!! (这是最关键的一步)
         offset = batch2offset(batch).int()
         
         return [coord, feat, offset], cluster
@@ -382,18 +381,23 @@ class UnpoolWithSkip(nn.Module):
         input: points: [pxo], [[n,3],[n,c],[b]], skip_points: [pxo], [[ns,3],[ns,c],[b]], cluster: [ns]
         output: points: [pxo], [[ns,3],[ns,c],[b]]
         """
-        coord, feat, offset = points # [n, 3] [n, c] [b]
-        skip_coord, skip_feat, skip_offset = skip_points # [ns, 3] [ns, c] [b]
+        coord, feat, offset = points 
+        skip_coord, skip_feat, skip_offset = skip_points 
         
         if self.backend == "map" and cluster is not None:
-            feat = self.proj(feat)[cluster] # [n, c] -> [ns, c], 投影上采样
+            feat = self.proj(feat)[cluster] 
         else:
-            # pointops.interpolation 只支持 FP32 输入，输出让 autocast 管理
             feat_proj = self.proj(feat)
+            # 🔥 [修复 3] 防御性编程：确保 interpolation 接收 int32 offset
+            if offset.dtype != torch.int32:
+                offset = offset.int()
+            if skip_offset.dtype != torch.int32:
+                skip_offset = skip_offset.int()
+                
             feat = pointops.interpolation(
                 coord.float(), skip_coord.float(), feat_proj.float(), offset, skip_offset
-            ) # [n, c] -> [ns, c], 插值上采样
+            ) 
         
-        if self.skip: # 跳跃连接，特征融合
-            feat = feat + self.proj_skip(skip_feat) # [ns, c]
-        return [skip_coord, feat, skip_offset] # [ns, 3] [ns, c] [b]
+        if self.skip: 
+            feat = feat + self.proj_skip(skip_feat) 
+        return [skip_coord, feat, skip_offset]

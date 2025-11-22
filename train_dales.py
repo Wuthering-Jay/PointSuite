@@ -42,11 +42,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from pointsuite.data import BinPklDataModule
 from pointsuite.data.transforms import (
     RandomRotate, RandomScale, RandomFlip, RandomJitter,
-    AddExtremeOutliers, Collect, ToTensor
+    AddExtremeOutliers, Collect, ToTensor, CenterShift
 )
 from pointsuite.tasks import SemanticSegmentationTask
 from pointsuite.models import PointTransformerV2, SegHead
-from pointsuite.utils.callbacks import SegmentationWriter
+from pointsuite.utils.callbacks import SegmentationWriter, AutoEmptyCacheCallback
 from pointsuite.utils.progress_bar import CustomProgressBar
 
 
@@ -56,7 +56,7 @@ def main():
     # ========================================================================
     
     # 数据
-    TRAIN_DATA = r"E:\data\DALES\dales_las\bin\test"
+    TRAIN_DATA = r"E:\data\DALES\dales_las\bin\train"
     TEST_DATA = r"E:\data\DALES\dales_las\bin\test"
     OUTPUT_DIR = r"E:\data\DALES\dales_las\bin\result"
     
@@ -66,12 +66,12 @@ def main():
     IGNORE_LABEL = -1
     
     # 训练
-    MAX_EPOCHS = 2
+    MAX_EPOCHS = 5
     BATCH_SIZE = 4
     NUM_WORKERS = 0  # 多进程数据加载，加速训练和推理
     LEARNING_RATE = 0.001
-    MAX_POINTS = 80000
-    MAX_POINTS_INFERENCE = 200000  # 推理时使用更大batch（无梯度，显存占用少）
+    MAX_POINTS = 250000
+    MAX_POINTS_INFERENCE = 300000  # 推理时使用更大batch（无梯度，显存占用少）
     ACCUMULATE_GRAD_BATCHES = 4  # 梯度累积：每4个batch更新一次参数，模拟更大batch
     
     pl.seed_everything(42)
@@ -90,6 +90,7 @@ def main():
     # ========================================================================
     
     train_transforms = [
+        CenterShift(),  # 中心化坐标
         RandomRotate(angle=[-180, 180], axis='z', p=0.5),
         RandomScale(scale=[0.9, 1.1]),
         RandomFlip(p=0.5),
@@ -105,12 +106,14 @@ def main():
     ]
     
     val_transforms = [
+        CenterShift(),  # 中心化坐标
         Collect(keys=['coord', 'class'], offset_key={'offset': 'coord'},
                 feat_keys={'feat': ['coord', 'echo']}),
         ToTensor(),
     ]
     
     predict_transforms = [
+        CenterShift(),  # 中心化坐标
         Collect(keys=['coord', 'indices', 'bin_file', 'bin_path', 'pkl_path'],
                 offset_key={'offset': 'coord'}, feat_keys={'feat': ['coord', 'echo']}),
         ToTensor(),
@@ -240,6 +243,7 @@ def main():
         LearningRateMonitor(logging_interval='step'),
         SegmentationWriter(output_dir=OUTPUT_DIR, save_logits=False, auto_infer_reverse_mapping=True),
         CustomProgressBar(refresh_rate=1),  # 自定义进度条
+        AutoEmptyCacheCallback(slowdown_threshold=3.0, clear_interval=100, warmup_steps=10, verbose=True),  # 自动清理显存
     ]
     
     csv_logger = CSVLogger(save_dir='./outputs/dales', name='csv_logs', version=None)
@@ -248,7 +252,7 @@ def main():
         max_epochs=MAX_EPOCHS,
         devices=1,
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
-        precision="16-mixed",
+        precision="bf16-mixed",
         log_every_n_steps=10,
         default_root_dir='./outputs/dales',
         logger=[csv_logger],
