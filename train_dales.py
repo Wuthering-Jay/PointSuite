@@ -66,11 +66,11 @@ def main():
     IGNORE_LABEL = -1
     
     # 训练
-    MAX_EPOCHS = 5
+    MAX_EPOCHS = 50
     BATCH_SIZE = 4
     NUM_WORKERS = 0  # 多进程数据加载，加速训练和推理
     LEARNING_RATE = 0.001
-    MAX_POINTS = 250000
+    MAX_POINTS = 300000
     MAX_POINTS_INFERENCE = 300000  # 推理时使用更大batch（无梯度，显存占用少）
     ACCUMULATE_GRAD_BATCHES = 4  # 梯度累积：每4个batch更新一次参数，模拟更大batch
     
@@ -243,7 +243,7 @@ def main():
         LearningRateMonitor(logging_interval='step'),
         SegmentationWriter(output_dir=OUTPUT_DIR, save_logits=False, auto_infer_reverse_mapping=True),
         CustomProgressBar(refresh_rate=1),  # 自定义进度条
-        AutoEmptyCacheCallback(slowdown_threshold=3.0, clear_interval=100, warmup_steps=10, verbose=True),  # 自动清理显存
+        AutoEmptyCacheCallback(slowdown_threshold=3.0, absolute_threshold=3.0, clear_interval=250, warmup_steps=10, verbose=True),  # 自动清理显存
     ]
     
     csv_logger = CSVLogger(save_dir='./outputs/dales', name='csv_logs', version=None)

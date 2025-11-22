@@ -773,73 +773,78 @@ class SegmentationWriter(BasePredictionWriter):
 
 class AutoEmptyCacheCallback(Callback):
     """
-    自动显存清理回调函数
+    自动显存清理回调函数 (增强版)
     
     功能：
-    1. 监控训练速度，当检测到 Batch 耗时异常增加（可能触发了共享显存）时，执行 empty_cache
-    2. 支持定期间隔清理（可选）
+    1. 绝对阈值检测：单次 Batch 耗时超过设定秒数，立即清理（防止开局即慢）
+    2. 相对阈值检测：耗时突增超过平均值 N 倍，立即清理（防止中途突发）
+    3. 定期清理：兜底机制
     """
     def __init__(
         self, 
-        slowdown_threshold: float = 3.0,  # 阈值：如果当前batch耗时超过平均值的 N 倍，则触发
-        clear_interval: int = 0,          # 兜底：每 N 个 batch 强制清理一次 (0表示禁用)
-        warmup_steps: int = 50,           # 预热：前 N 步不检测，让平均时间稳定
+        slowdown_threshold: float = 3.0,   # 相对阈值：当前耗时 > 平均值 * N
+        absolute_threshold: float = None,  # 绝对阈值 (秒)：当前耗时 > N 秒 (建议设为正常Batch耗时的2-3倍)
+        clear_interval: int = 0,           # 定期清理间隔 (0表示禁用)
+        warmup_steps: int = 50,            # 相对检测的预热步数
         verbose: bool = True
     ):
         super().__init__()
         self.slowdown_threshold = slowdown_threshold
+        self.absolute_threshold = absolute_threshold
         self.clear_interval = clear_interval
         self.warmup_steps = warmup_steps
         self.verbose = verbose
         
         self._start_time = 0.0
         self._avg_time = 0.0
-        self._alpha = 0.05  # 平滑系数 (EMA)
-        self._last_clear_step = 0
+        self._alpha = 0.05  # EMA 平滑系数
+        self._last_clear_step = -100  # 初始化为负数，确保刚开始也能触发
 
     def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
-        # 记录开始时间
         self._start_time = time.time()
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        # 计算当前 batch 耗时
         duration = time.time() - self._start_time
         
         should_clear = False
         reason = ""
 
-        # 1. 策略一：定期清理 (兜底)
-        if self.clear_interval > 0 and (batch_idx + 1) % self.clear_interval == 0:
-            should_clear = True
-            reason = "periodic"
+        # 1. 策略一：绝对时长阈值 (最高优先级，不受预热影响)
+        # 解决 "开局即慢" 或 "一直慢" 的问题
+        if self.absolute_threshold is not None and duration > self.absolute_threshold:
+            # 防止过于频繁触发（例如每个batch都超），设置最小间隔（例如5个batch）
+            if batch_idx - self._last_clear_step > 5:
+                should_clear = True
+                reason = f"absolute limit ({duration:.2f}s > {self.absolute_threshold}s)"
 
-        # 2. 策略二：智能检测速度变慢
-        # 仅在预热后，且当前耗时远超平均值时触发
+        # 2. 策略二：相对时长检测 (需预热)
+        # 解决 "突然变慢" 的问题
         elif (batch_idx > self.warmup_steps and 
               self._avg_time > 0 and 
               duration > self._avg_time * self.slowdown_threshold):
             
-            # 防止连续触发 (至少间隔 5 个 batch)
             if batch_idx - self._last_clear_step > 5:
                 should_clear = True
                 reason = f"slowdown detected ({duration:.2f}s vs avg {self._avg_time:.2f}s)"
+
+        # 3. 策略三：定期清理 (兜底)
+        elif self.clear_interval > 0 and (batch_idx + 1) % self.clear_interval == 0:
+            should_clear = True
+            reason = "periodic"
 
         # 执行清理
         if should_clear:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-                # 可选：同步一下以确保清理完成，但这会增加一点点耗时
-                # torch.cuda.synchronize() 
-                
                 self._last_clear_step = batch_idx
                 if self.verbose:
-                    # 打印提示（使用 rank_zero_print 避免多卡重复打印）
                     trainer.print(f"\n[AutoCache] 🧹 CUDA cache cleared at step {batch_idx}. Reason: {reason}")
         
-        # 更新移动平均耗时 (EMA)
-        # 如果发生了清理，当前 batch 耗时可能不准确（包含了 swap 时间），可以选择不更新或小权重更新
-        # 这里我们选择正常更新，以便适应整体变慢的情况
-        if self._avg_time == 0:
-            self._avg_time = duration
-        else:
-            self._avg_time = self._avg_time * (1 - self._alpha) + duration * self._alpha
+        # 更新移动平均耗时
+        # 注意：如果当前 batch 触发了清理（说明它是不正常的慢），我们通常不希望它大幅污染平均值
+        # 所以如果是异常慢的 batch，我们可以选择不更新 avg，或者赋予极小的权重
+        if not should_clear:
+            if self._avg_time == 0:
+                self._avg_time = duration
+            else:
+                self._avg_time = self._avg_time * (1 - self._alpha) + duration * self._alpha
