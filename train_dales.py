@@ -31,10 +31,14 @@ DALES 数据集训练脚本（纯 Python 配置）
 
 import os
 import sys
+import warnings
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
 from pytorch_lightning.loggers import CSVLogger
+
+# 忽略 Windows 下 num_workers 的警告
+warnings.filterwarnings("ignore", ".*does not have many workers.*")
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -248,8 +252,15 @@ def main():
     # ========================================================================
     
     callbacks = [
-        ModelCheckpoint(monitor='mean_iou', mode='max', save_top_k=3,
-                       filename='dales-{epoch:02d}-{mean_iou:.4f}', verbose=True),
+        # 保存最佳模型 (Top 3) 和 最后一个模型 (last.ckpt)
+        ModelCheckpoint(
+            monitor='mean_iou', 
+            mode='max', 
+            save_top_k=3,
+            save_last=True,  # 🔥 保存最后一个模型为 last.ckpt
+            filename='dales-{epoch:02d}-{mean_iou:.4f}', 
+            verbose=True
+        ),
         EarlyStopping(monitor='mean_iou', patience=20, mode='max', verbose=True, 
                      check_on_train_epoch_end=False),  # 🔥 修复：在验证结束时检查，而不是训练结束时
         LearningRateMonitor(logging_interval='step'),
@@ -285,21 +296,41 @@ def main():
     # 训练流程
     # ========================================================================
     
+    # 如果需要从断点恢复训练，请设置 ckpt_path
+    # 例如: ckpt_path = "outputs/dales/csv_logs/version_0/checkpoints/last.ckpt"
+    ckpt_path = r"E:\code\PointSuite\outputs\dales\csv_logs\version_48\checkpoints\dales-epoch=01-mean_iou=0.6521.ckpt"
+
     print("\n" + "=" * 80)
     print("开始训练")
     print("=" * 80)
-    trainer.fit(task, datamodule)
+    trainer.fit(task, datamodule, ckpt_path=ckpt_path)
     
+    if datamodule.test_data is not None:
+        print("\n" + "=" * 80)
+        print("开始测试")
+        print("=" * 80)
+        trainer.test(task, datamodule)
+    else:
+        print("\n" + "=" * 80)
+        print("跳过测试 (未提供测试数据)")
+        print("=" * 80)
+    
+    if datamodule.predict_data is not None:
+        print("\n" + "=" * 80)
+        print("开始预测")
     print("\n" + "=" * 80)
-    print("开始测试")
+    print("训练完成！")
     print("=" * 80)
-    trainer.test(task, datamodule)
+    print(f"检查点: {trainer.default_root_dir}")
+    print(f"预测结果: {OUTPUT_DIR}")
     
-    print("\n" + "=" * 80)
-    print("开始预测")
-    print("=" * 80)
-    trainer.predict(task, datamodule)
+    if trainer.checkpoint_callback.best_model_path:
+        print(f"最佳模型: {trainer.checkpoint_callback.best_model_path}")
     
+    if trainer.checkpoint_callback.best_model_score is not None:
+        print(f"最佳 MeanIoU: {trainer.checkpoint_callback.best_model_score:.4f}")
+    else:
+        print("最佳 MeanIoU: N/A (未生成或未记录)")
     print("\n" + "=" * 80)
     print("训练完成！")
     print("=" * 80)

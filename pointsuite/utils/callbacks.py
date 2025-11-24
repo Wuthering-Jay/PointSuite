@@ -305,7 +305,9 @@ class SemanticPredictLasWriter(BasePredictionWriter):
         # 尝试从临时文件获取
         if tmp_files:
             try:
-                data = torch.load(tmp_files[0])
+                # 显式设置 weights_only=False 以消除 FutureWarning
+                # 我们需要加载包含路径字符串的字典，这是安全的（因为是我们在 write_on_batch_end 中生成的）
+                data = torch.load(tmp_files[0], weights_only=False)
                 if 'bin_path' in data and 'pkl_path' in data:
                     bp = data['bin_path']
                     pp = data['pkl_path']
@@ -323,7 +325,8 @@ class SemanticPredictLasWriter(BasePredictionWriter):
         
         for f in tmp_files:
             try:
-                d = torch.load(f)
+                # 显式设置 weights_only=False 以消除 FutureWarning
+                d = torch.load(f, weights_only=False)
                 # 确保 float32
                 logits_sum.index_add_(0, d['indices'].long(), d['logits'].float())
                 counts.index_add_(0, d['indices'].long(), torch.ones(len(d['indices']), dtype=torch.int32))
