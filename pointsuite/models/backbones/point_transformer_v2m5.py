@@ -33,13 +33,13 @@ class Block(nn.Module):
             attn_drop_rate=attn_drop_rate,
             pe_multiplier=pe_multiplier,
             pe_bias=pe_bias,
-            norm_layer=PointBatchNorm,
+            norm_layer=PointLayerNorm,
         )
         self.fc1 = nn.Linear(embed_channels, embed_channels, bias=False)
         self.fc3 = nn.Linear(embed_channels, embed_channels, bias=False)
-        self.norm1 = PointBatchNorm(embed_channels)
-        self.norm2 = PointBatchNorm(embed_channels)
-        self.norm3 = PointBatchNorm(embed_channels)
+        self.norm1 = PointLayerNorm(embed_channels)
+        self.norm2 = PointLayerNorm(embed_channels)
+        self.norm3 = PointLayerNorm(embed_channels)
         self.act = nn.ReLU(inplace=True)
         self.drop_path = (DropPath(drop_path_rate) if drop_path_rate > 0.0 else nn.Identity())
 
@@ -274,10 +274,10 @@ class GVAPatchEmbed(nn.Module):
         self.embed_channels = embed_channels
         self.proj = nn.Sequential(
             nn.Linear(in_channels, self.mid_channels, bias=False),
-            PointBatchNorm(self.mid_channels),
+            PointLayerNorm(self.mid_channels),
             nn.ReLU(inplace=True),
         )
-        self.pointnet = PointNetLayer(in_channels, embed_channels-self.mid_channels, norm_layer=PointBatchNorm, k_neighbors=neighbours)
+        self.pointnet = PointNetLayer(in_channels, embed_channels-self.mid_channels, norm_layer=PointLayerNorm, k_neighbors=neighbours)
         
         self.blocks = BlockSequence(
             depth=depth,

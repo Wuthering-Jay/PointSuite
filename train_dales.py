@@ -46,7 +46,7 @@ from pointsuite.data.transforms import (
 )
 from pointsuite.tasks import SemanticSegmentationTask
 from pointsuite.models import PointTransformerV2, SegHead
-from pointsuite.utils.callbacks import SegmentationWriter, AutoEmptyCacheCallback
+from pointsuite.utils.callbacks import SemanticPredictLasWriter, AutoEmptyCacheCallback
 from pointsuite.utils.progress_bar import CustomProgressBar
 
 
@@ -56,7 +56,7 @@ def main():
     # ========================================================================
     
     # 数据
-    TRAIN_DATA = r"E:\data\DALES\dales_las\bin\train"
+    TRAIN_DATA = r"E:\data\DALES\dales_las\bin\test"
     TEST_DATA = r"E:\data\DALES\dales_las\bin\test"
     OUTPUT_DIR = r"E:\data\DALES\dales_las\bin\result"
     
@@ -66,11 +66,11 @@ def main():
     IGNORE_LABEL = -1
     
     # 训练
-    MAX_EPOCHS = 50
+    MAX_EPOCHS = 2
     BATCH_SIZE = 4
     NUM_WORKERS = 0  # 多进程数据加载，加速训练和推理
     LEARNING_RATE = 0.001
-    MAX_POINTS = 300000
+    MAX_POINTS = 150000
     MAX_POINTS_INFERENCE = 300000  # 推理时使用更大batch（无梯度，显存占用少）
     ACCUMULATE_GRAD_BATCHES = 4  # 梯度累积：每4个batch更新一次参数，模拟更大batch
     
@@ -125,8 +125,8 @@ def main():
     
     datamodule = BinPklDataModule(
         train_data=TRAIN_DATA,
-        val_data=TRAIN_DATA,
-        test_data=TEST_DATA,
+        val_data=TEST_DATA,
+        test_data=None,
         predict_data=TEST_DATA,
         assets=['coord', 'echo', 'class'],
         class_mapping=CLASS_MAPPING,
@@ -158,30 +158,43 @@ def main():
     # 模型
     # ========================================================================
     
-    backbone = PointTransformerV2(
-        in_channels=5,
-        patch_embed_depth=1,
-        patch_embed_channels=24,
-        patch_embed_groups=6,
-        patch_embed_neighbours=24,
-        enc_depths=(1, 1, 1, 1),
-        enc_channels=(48, 96, 192, 256),
-        enc_groups=(6, 12, 24, 32),
-        enc_neighbours=(16, 16, 16, 16),
-        dec_depths=(1, 1, 1, 1),
-        dec_channels=(24, 48, 96, 192),
-        dec_groups=(4, 6, 12, 24),
-        dec_neighbours=(16, 16, 16, 16),
-        grid_sizes=(1, 2.5, 7.5, 15),
-        attn_qkv_bias=True,
-        pe_multiplier=False,
-        pe_bias=True,
-        attn_drop_rate=0.0,
-        drop_path_rate=0.2,
-        unpool_backend="interp",
-    )
-    
-    head = SegHead(in_channels=24, num_classes=NUM_CLASSES)
+    # 使用配置字典定义模型结构，而不是直接实例化对象
+    # 这样可以避免 PyTorch Lightning 的 "attribute is already saved" 警告
+    # 并且让 checkpoint 更轻量、更规范
+    model_config = {
+        'backbone': {
+            'class_path': 'pointsuite.models.PointTransformerV2',
+            'init_args': {
+                'in_channels': 5,
+                'patch_embed_depth': 1,
+                'patch_embed_channels': 24,
+                'patch_embed_groups': 6,
+                'patch_embed_neighbours': 24,
+                'enc_depths': (1, 1, 1, 1),
+                'enc_channels': (48, 96, 192, 256),
+                'enc_groups': (6, 12, 24, 32),
+                'enc_neighbours': (16, 16, 16, 16),
+                'dec_depths': (1, 1, 1, 1),
+                'dec_channels': (24, 48, 96, 192),
+                'dec_groups': (4, 6, 12, 24),
+                'dec_neighbours': (16, 16, 16, 16),
+                'grid_sizes': (1, 2.5, 7.5, 15),
+                'attn_qkv_bias': True,
+                'pe_multiplier': False,
+                'pe_bias': True,
+                'attn_drop_rate': 0.0,
+                'drop_path_rate': 0.2,
+                'unpool_backend': "interp",
+            }
+        },
+        'head': {
+            'class_path': 'pointsuite.models.SegHead',
+            'init_args': {
+                'in_channels': 24,
+                'num_classes': NUM_CLASSES
+            }
+        }
+    }
     
     # 损失函数（不使用类别权重，让加权采样处理类别不平衡）
     loss_configs = [
@@ -213,8 +226,7 @@ def main():
     ]
     
     task = SemanticSegmentationTask(
-        backbone=backbone,
-        head=head,
+        model_config=model_config,  # 传入配置字典
         learning_rate=LEARNING_RATE,
         class_mapping=CLASS_MAPPING,
         class_names=CLASS_NAMES,
@@ -241,9 +253,9 @@ def main():
         EarlyStopping(monitor='mean_iou', patience=20, mode='max', verbose=True, 
                      check_on_train_epoch_end=False),  # 🔥 修复：在验证结束时检查，而不是训练结束时
         LearningRateMonitor(logging_interval='step'),
-        SegmentationWriter(output_dir=OUTPUT_DIR, save_logits=False, auto_infer_reverse_mapping=True),
+        SemanticPredictLasWriter(output_dir=OUTPUT_DIR, save_logits=False, auto_infer_reverse_mapping=True),
         CustomProgressBar(refresh_rate=1),  # 自定义进度条
-        AutoEmptyCacheCallback(slowdown_threshold=3.0, absolute_threshold=3.0, clear_interval=250, warmup_steps=10, verbose=True),  # 自动清理显存
+        AutoEmptyCacheCallback(slowdown_threshold=3.0, absolute_threshold=1.5, clear_interval=500, warmup_steps=10, verbose=True),  # 自动清理显存
     ]
     
     csv_logger = CSVLogger(save_dir='./outputs/dales', name='csv_logs', version=None)

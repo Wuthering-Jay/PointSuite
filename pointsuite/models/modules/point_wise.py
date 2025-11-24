@@ -69,7 +69,7 @@ class GroupedVectorAttention(nn.Module):
         qkv_bias=True,
         pe_multiplier=False,
         pe_bias=True,
-        norm_layer=PointBatchNorm,
+        norm_layer=PointLayerNorm,
     ):
         super(GroupedVectorAttention, self).__init__()
         self.embed_channels = embed_channels
@@ -156,7 +156,7 @@ class GroupedVectorAttention(nn.Module):
     
 
 class PointNetLayer(nn.Module):
-    def __init__(self, in_channels, out_channels, norm_layer=PointBatchNorm, k_neighbors=16):
+    def __init__(self, in_channels, out_channels, norm_layer=PointLayerNorm, k_neighbors=16):
         """
         使用 Linear 层和 PointBatchNorm 的 PointNet 层实现
         
@@ -220,7 +220,7 @@ class GridPool(nn.Module):
         self.grid_size = grid_size
 
         self.fc = nn.Linear(in_channels, out_channels, bias=bias)
-        self.norm = PointBatchNorm(out_channels)
+        self.norm = PointLayerNorm(out_channels)
         self.act = nn.ReLU(inplace=True)
 
     def forward(self, points, start=None):
@@ -290,7 +290,7 @@ class GridPool1(nn.Module):
         self.grid_size = grid_size
 
         self.fc = nn.Linear(in_channels, out_channels, bias=bias)
-        self.norm = PointBatchNorm(out_channels)
+        self.norm = PointLayerNorm(out_channels)
         self.act = nn.ReLU(inplace=True)
 
     def forward(self, points, start=None):
@@ -367,12 +367,12 @@ class UnpoolWithSkip(nn.Module):
 
         self.proj = nn.Sequential(
             nn.Linear(in_channels, out_channels, bias=bias),
-            PointBatchNorm(out_channels),
+            PointLayerNorm(out_channels),
             nn.ReLU(inplace=True),
         )
         self.proj_skip = nn.Sequential(
             nn.Linear(skip_channels, out_channels, bias=bias),
-            PointBatchNorm(out_channels),
+            PointLayerNorm(out_channels),
             nn.ReLU(inplace=True),
         )
 

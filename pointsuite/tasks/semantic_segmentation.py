@@ -15,21 +15,56 @@ class SemanticSegmentationTask(BaseTask):
     """
     
     def __init__(self,
-                 backbone: nn.Module,
-                 head: nn.Module,
+                 backbone: nn.Module = None,
+                 head: nn.Module = None,
+                 model_config: Dict[str, Any] = None,
                  **kwargs): # 接收来自 BaseTask 的所有参数 (learning_rate, loss_configs, etc.)
         """
         Args:
             backbone (nn.Module): 已经实例化的骨干网络 (例如 PT-v2m5)。
             head (nn.Module): 已经实例化的分割头 (例如 SegmentationHead)。
+            model_config (Dict): 模型配置字典，用于从配置实例化 backbone 和 head。
+                                 如果提供了 model_config，则忽略 backbone 和 head 参数。
+                                 格式:
+                                 {
+                                     'backbone': {'class_path': '...', 'init_args': {...}},
+                                     'head': {'class_path': '...', 'init_args': {...}}
+                                 }
             **kwargs: 传递给 BaseTask 的参数。
         """
         super().__init__(**kwargs)
         
-        # 将 backbone 和 head 保存为子模块
-        # (注意: BaseTask 并不假定一定有 backbone，所以我们在这里保存)
-        self.backbone = backbone
-        self.head = head
+        # 🔥 关键修改：保存 hyperparameters
+        # 如果使用 model_config，我们忽略 backbone 和 head 对象，避免重复保存和警告
+        # 如果使用 backbone/head 对象，我们必须保存它们以支持自动重建（尽管会有警告）
+        if model_config is not None:
+            self.save_hyperparameters(ignore=['backbone', 'head'])
+            
+            # 从配置实例化
+            backbone_cfg = model_config.get('backbone')
+            head_cfg = model_config.get('head')
+            
+            if backbone_cfg:
+                backbone_cls = self._import_class(backbone_cfg['class_path'])
+                self.backbone = backbone_cls(**backbone_cfg.get('init_args', {}))
+            
+            if head_cfg:
+                head_cls = self._import_class(head_cfg['class_path'])
+                self.head = head_cls(**head_cfg.get('init_args', {}))
+                
+        else:
+            # 兼容旧方式：直接传入对象
+            # 这种情况下我们不 ignore backbone/head，以便 load_from_checkpoint 能工作
+            # 用户会看到 PL 的警告，但这是预期的
+            self.save_hyperparameters()
+            self.backbone = backbone
+            self.head = head
+            
+        # 验证模型是否正确初始化
+        if not hasattr(self, 'backbone') or self.backbone is None:
+            raise ValueError("Backbone 未初始化！请提供 backbone 对象或 model_config")
+        if not hasattr(self, 'head') or self.head is None:
+            raise ValueError("Head 未初始化！请提供 head 对象或 model_config")
 
     def forward(self, batch: Dict[str, Any]) -> torch.Tensor:
         """
@@ -109,7 +144,7 @@ class SemanticSegmentationTask(BaseTask):
         使用场景：
         - 新场景预测（无标签）
         - 生产环境部署
-        - 需要保存 .las 文件时使用 Trainer.predict() + SegmentationWriter
+        - 需要保存 .las 文件时使用 Trainer.predict() + SemanticPredictLasWriter
         """
         # 1. 前向传播
         preds = self.forward(batch)

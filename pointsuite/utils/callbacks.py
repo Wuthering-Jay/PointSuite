@@ -45,50 +45,18 @@ def create_reverse_class_mapping(class_mapping: Dict[int, int]) -> Dict[int, int
     return {v: k for k, v in class_mapping.items()}
 
 
-class SegmentationWriter(BasePredictionWriter):
+class SemanticPredictLasWriter(BasePredictionWriter):
     """
     用于语义分割的 PredictionWriter 回调 (适配 bin+pkl 数据格式)
-
-    专为 PointSuite 的 bin+pkl 数据结构设计，与 BinPklDataset 和 SemanticSegmentationTask 协同工作。
-
-    数据流程:
-    1. tile.py 在分割 LAS 文件时，为每个 segment 保存文件关联信息:
-       - 'bin_file': bin 文件名
-       - 'bin_path': 完整 bin 文件路径
-       - 'pkl_path': 完整 pkl 文件路径
-       
-    2. BinPklDataset (test split) 加载数据时，将文件信息加入 data 字典:
-       {'coord', 'feat', 'indices', 'bin_file', 'bin_path', 'pkl_path', ...}
-       
-    3. SemanticSegmentationTask.predict_step 返回时，传递文件信息:
-       {'logits', 'indices', 'bin_file', 'bin_path', 'pkl_path', 'coord'}
-       - 'logits': [N, C] 模型预测的类别 logits
-       - 'indices': [N] 原始点索引
-       - 'bin_file': bin 文件名（直接来自 dataset）
-       - 'bin_path': bin 文件完整路径
-       - 'pkl_path': pkl 文件完整路径
-       - 'coord': [N, 3] 点坐标 (用于可视化)
-
-    4. 本回调执行投票并保存:
-       - 直接使用传递的文件路径信息，无需推断
-       - 对于每个 bin 文件，累积所有 segment 的预测
-       - 使用 logits 平均进行多次预测投票
-       - 从原始 bin/pkl 加载完整点云和 LAS 头信息
-       - 保存为 .las 文件，保留原始坐标系统和精度
-
-    工作流程:
-    1. write_on_batch_end: 将每个批次的预测流式写入临时文件 (.tmp)，防止 OOM
-    2. on_predict_end: 预测结束后触发，对每个 bin 文件执行:
-       a. 收集所有临时文件
-       b. 按 bin 文件分组
-       c. 执行投票累积 (logits 平均)
-       d. 从原始 bin/pkl 加载坐标和 LAS 头
-       e. 保存完整点云为 .las 文件
-       f. 清理临时文件
     
-    注意: 
-    - 文件信息在整个数据流中显式传递，避免了推断的不确定性
-    - 即使 batch 包含来自多个 segment 的点，它们必定来自同一个 bin 文件
+    重命名自 SegmentationWriter，专为 PointSuite 的 bin+pkl 数据结构设计。
+    负责将模型预测结果流式写入临时文件，并在预测结束后合并、投票并保存为 LAS 文件。
+
+    主要功能:
+    1. 流式写入: 防止大规模点云预测时的 OOM。
+    2. 投票机制: 对重叠预测进行 logits 平均投票。
+    3. 完整性恢复: 从原始 bin/pkl 恢复坐标和属性。
+    4. 格式保持: 保留原始 LAS 头信息和坐标系。
     """
     
     def __init__(self, 
@@ -98,20 +66,6 @@ class SegmentationWriter(BasePredictionWriter):
                  save_logits: bool = False,
                  reverse_class_mapping: Optional[Dict[int, int]] = None,
                  auto_infer_reverse_mapping: bool = True):
-        """
-        Args:
-            output_dir (str): 保存最终 .las 文件的目录
-            write_interval (str): 必须是 "batch" 才能实现流式传输
-            num_classes (int): 类的数量，用于创建投票数组
-                              如果为 -1，将从 Task 的 head.out_channels 自动推断
-            save_logits (bool): 是否同时保存 logits 到 .npz 文件 (用于后处理/集成)
-            reverse_class_mapping (Optional[Dict[int, int]]): 将连续标签映射回原始标签
-                                  例如: {0: 0, 1: 1, 2: 2, 3: 6, 4: 9}
-                                  如果为 None 且 auto_infer_reverse_mapping=True，
-                                  将尝试从 DataModule.class_mapping 自动构建
-            auto_infer_reverse_mapping (bool): 是否自动从 DataModule 推断 reverse_class_mapping
-                                              默认 True。当 reverse_class_mapping=None 时生效
-        """
         super().__init__(write_interval)
         self.output_dir = output_dir
         self.temp_dir = os.path.join(self.output_dir, "temp_predictions")
@@ -119,58 +73,14 @@ class SegmentationWriter(BasePredictionWriter):
         self.save_logits = save_logits
         self.reverse_class_mapping = reverse_class_mapping
         self.auto_infer_reverse_mapping = auto_infer_reverse_mapping
-        self._mapping_inferred = False  # 标记是否已推断
+        self._mapping_inferred = False
         
         os.makedirs(self.output_dir, exist_ok=True)
         os.makedirs(self.temp_dir, exist_ok=True)
     
     def on_predict_start(self, trainer: 'pl.Trainer', pl_module: 'pl.LightningModule'):
-        """
-        预测开始时，尝试自动推断 reverse_class_mapping
-        
-        优先级：
-        1. 用户提供的 reverse_class_mapping（最高优先级）
-        2. 模型 checkpoint 中的 class_mapping（从 hparams 加载）
-        3. DataModule 中的 class_mapping
-        """
-        # 如果用户已经提供了 reverse_class_mapping，跳过推断
-        if self.reverse_class_mapping is not None:
-            pl_module.print(f"[SegmentationWriter] 使用用户提供的 reverse_class_mapping: {self.reverse_class_mapping}")
-            return
-        
-        # 如果不需要自动推断，跳过
-        if not self.auto_infer_reverse_mapping:
-            return
-        
-        # 优先级 1: 尝试从模型 checkpoint 获取 class_mapping
-        try:
-            if hasattr(pl_module, 'hparams') and hasattr(pl_module.hparams, 'class_mapping'):
-                class_mapping = pl_module.hparams.class_mapping
-                if class_mapping is not None:
-                    # 构建反向映射
-                    self.reverse_class_mapping = {v: k for k, v in class_mapping.items()}
-                    self._mapping_inferred = True
-                    pl_module.print(f"[SegmentationWriter] 自动加载 reverse_class_mapping 从模型 checkpoint:")
-                    pl_module.print(f"  - class_mapping: {class_mapping}")
-                    pl_module.print(f"  - reverse_class_mapping: {self.reverse_class_mapping}")
-                    return
-        except Exception as e:
-            pl_module.print(f"[SegmentationWriter] 无法从模型加载 class_mapping: {e}")
-        
-        # 优先级 2: 尝试从 DataModule 获取 class_mapping
-        try:
-            datamodule = trainer.datamodule
-            if hasattr(datamodule, 'class_mapping') and datamodule.class_mapping is not None:
-                # 构建反向映射
-                self.reverse_class_mapping = {v: k for k, v in datamodule.class_mapping.items()}
-                self._mapping_inferred = True
-                pl_module.print(f"[SegmentationWriter] 自动推断 reverse_class_mapping 从 DataModule:")
-                pl_module.print(f"  - class_mapping: {datamodule.class_mapping}")
-                pl_module.print(f"  - reverse_class_mapping: {self.reverse_class_mapping}")
-            else:
-                pl_module.print(f"[SegmentationWriter] 未找到 class_mapping，预测结果将使用模型输出的连续标签")
-        except Exception as e:
-            pl_module.print(f"[SegmentationWriter] 警告: 无法推断 reverse_class_mapping: {e}")
+        """预测开始前的初始化工作，主要是推断类别映射"""
+        self._infer_class_mapping(trainer, pl_module)
 
     def write_on_batch_end(
         self, 
@@ -182,386 +92,268 @@ class SegmentationWriter(BasePredictionWriter):
         batch_idx: int, 
         dataloader_idx: int
     ):
-        """ 
-        在每个预测批次结束后，将结果流式写入临时文件
-        
-        prediction 字典应包含:
-        - 'logits': [N, C] 模型预测
-        - 'indices': [N] 原始 bin 文件中的点索引
-        - 'bin_file': bin 文件名（列表，每个点对应的文件）
-        - 'coord': [N, 3] 点坐标 (可选，用于调试)
-        """
-        
-        if 'logits' not in prediction or 'indices' not in prediction:
-            print(f"警告: predict_step 必须返回 'logits' 和 'indices'。跳过批次 {batch_idx}")
+        """每个批次结束时，将预测结果写入临时文件"""
+        if not self._validate_prediction(prediction, batch_idx):
             return
         
-        if 'bin_file' not in prediction or len(prediction['bin_file']) == 0:
-            print(f"警告: batch {batch_idx} 缺少 bin_file 信息，跳过")
-            return
+        # 1. 准备数据
+        bin_files = prediction['bin_file']
+        logits = prediction['logits'].cpu().float() # 确保 float32
+        indices = prediction['indices'].cpu()
         
-        # 1. 获取基础数据
-        bin_files = prediction['bin_file']  # List[str], 长度 = Batch Size
-        logits = prediction['logits'].cpu()  # [Total_Points, C]
-        indices = prediction['indices'].cpu()  # [Total_Points]
-        
-        # 获取完整路径信息（如果可用）
         bin_paths = prediction.get('bin_path', [None] * len(bin_files))
         pkl_paths = prediction.get('pkl_path', [None] * len(bin_files))
         
-        # 2. 🔥 关键修复：获取 offset 信息来正确切分数据
-        # batch['offset'] 是累积点数: [n1, n1+n2, n1+n2+n3, ...]
-        if 'offset' in batch:
-            offsets = batch['offset'].cpu().numpy()
-        else:
-            # 如果没有 offset，假设 batch_size=1，所有点属于同一个文件
-            offsets = [len(logits)]
+        # 获取 offset
+        offsets = batch['offset'].cpu().numpy() if 'offset' in batch else [len(logits)]
         
-        # 3. 按样本切分并分组
+        # 2. 按文件分组并保存
+        self._save_batch_predictions(
+            bin_files, logits, indices, bin_paths, pkl_paths, offsets, batch_idx, pl_module
+        )
+
+    def on_predict_end(self, trainer: 'pl.Trainer', pl_module: 'pl.LightningModule'):
+        """预测结束后的汇总处理"""
+        self._ensure_num_classes(pl_module)
+        pl_module.print(f"\n[SemanticPredictLasWriter] 预测完成，开始拼接和投票...")
+        
+        tmp_files = sorted(glob.glob(os.path.join(self.temp_dir, "*.pred.tmp")))
+        if not tmp_files:
+            pl_module.print("[SemanticPredictLasWriter] 警告: 未找到临时预测文件")
+            return
+            
+        # 按 bin 文件分组
+        bin_file_groups = self._group_temp_files(tmp_files)
+        pl_module.print(f"[SemanticPredictLasWriter] 检测到 {len(bin_file_groups)} 个唯一 bin 文件")
+        
+        try:
+            for bin_basename, file_list in bin_file_groups.items():
+                pl_module.print(f"\n[SemanticPredictLasWriter] 处理 bin 文件: {bin_basename} ({len(file_list)} 个批次)")
+                try:
+                    self._process_single_bin_file(bin_basename, file_list, trainer, pl_module)
+                except Exception as e:
+                    pl_module.print(f"!!! 错误: 处理 {bin_basename} 时失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+        finally:
+            self._cleanup_temp_files(tmp_files, pl_module)
+
+    # ================= 内部辅助方法 =================
+
+    def _infer_class_mapping(self, trainer, pl_module):
+        """推断反向类别映射"""
+        if self.reverse_class_mapping is not None:
+            pl_module.print(f"[SemanticPredictLasWriter] 使用用户提供的 reverse_class_mapping: {self.reverse_class_mapping}")
+            return
+        
+        if not self.auto_infer_reverse_mapping:
+            return
+            
+        # 尝试从模型 checkpoint 获取
+        try:
+            if hasattr(pl_module, 'hparams') and hasattr(pl_module.hparams, 'class_mapping'):
+                mapping = pl_module.hparams.class_mapping
+                if mapping:
+                    self.reverse_class_mapping = {v: k for k, v in mapping.items()}
+                    self._mapping_inferred = True
+                    pl_module.print(f"[SemanticPredictLasWriter] 从模型 checkpoint 加载 reverse_class_mapping")
+                    return
+        except Exception:
+            pass
+            
+        # 尝试从 DataModule 获取
+        try:
+            datamodule = trainer.datamodule
+            if hasattr(datamodule, 'class_mapping') and datamodule.class_mapping:
+                self.reverse_class_mapping = {v: k for k, v in datamodule.class_mapping.items()}
+                self._mapping_inferred = True
+                pl_module.print(f"[SemanticPredictLasWriter] 从 DataModule 推断 reverse_class_mapping")
+            else:
+                pl_module.print(f"[SemanticPredictLasWriter] 未找到 class_mapping，使用连续标签")
+        except Exception as e:
+            pl_module.print(f"[SemanticPredictLasWriter] 警告: 无法推断 reverse_class_mapping: {e}")
+
+    def _validate_prediction(self, prediction, batch_idx):
+        if 'logits' not in prediction or 'indices' not in prediction:
+            print(f"警告: predict_step 必须返回 'logits' 和 'indices'。跳过批次 {batch_idx}")
+            return False
+        if 'bin_file' not in prediction or len(prediction['bin_file']) == 0:
+            print(f"警告: batch {batch_idx} 缺少 bin_file 信息，跳过")
+            return False
+        return True
+
+    def _save_batch_predictions(self, bin_files, logits, indices, bin_paths, pkl_paths, offsets, batch_idx, pl_module):
+        """将一个批次的预测按文件拆分并保存"""
         file_groups = defaultdict(lambda: {'logits': [], 'indices': [], 'bin_path': None, 'pkl_path': None})
         
         start_idx = 0
         for i, end_idx in enumerate(offsets):
-            # 获取当前样本的文件名
-            if isinstance(bin_files, list):
-                bin_basename = bin_files[i] if isinstance(bin_files[i], str) else str(bin_files[i])
-            else:
-                # 处理可能的单样本情况
-                bin_basename = str(bin_files)
-            
+            # 获取文件名
+            f = bin_files[i]
+            bin_basename = (f if isinstance(f, str) else str(f))
             if bin_basename.endswith('.bin'):
                 bin_basename = bin_basename[:-4]
             
-            # 🔥 关键修复：使用切片获取该样本的所有点
-            sample_logits = logits[start_idx:end_idx]
-            sample_indices = indices[start_idx:end_idx]
+            # 切片
+            file_groups[bin_basename]['logits'].append(logits[start_idx:end_idx])
+            file_groups[bin_basename]['indices'].append(indices[start_idx:end_idx])
             
-            # 累积数据
-            file_groups[bin_basename]['logits'].append(sample_logits)
-            file_groups[bin_basename]['indices'].append(sample_indices)
-            
-            # 保存路径信息
+            # 路径
             if file_groups[bin_basename]['bin_path'] is None:
                 if isinstance(bin_paths, list) and i < len(bin_paths):
                     file_groups[bin_basename]['bin_path'] = bin_paths[i]
                 if isinstance(pkl_paths, list) and i < len(pkl_paths):
                     file_groups[bin_basename]['pkl_path'] = pkl_paths[i]
             
-            # 更新起始位置
             start_idx = end_idx
-        
-        # 4. 保存临时文件
-        for bin_basename, data in file_groups.items():
-            # 拼接该文件在这个 batch 中的所有片段（如果有多个）
-            if len(data['logits']) > 0:
-                file_logits = torch.cat(data['logits'], dim=0)
-                file_indices = torch.cat(data['indices'], dim=0)
-                
-                # 定义临时文件名
-                tmp_filename = f"{bin_basename}_batch_{batch_idx}.pred.tmp"
-                save_path = os.path.join(self.temp_dir, tmp_filename)
-                
-                # 保存预测结果到磁盘
-                save_dict = {
-                    'logits': file_logits,
-                    'indices': file_indices,
-                    'bin_file': bin_basename,
-                }
-                
-                # 保存完整路径信息（如果可用）
-                if data['bin_path'] is not None:
-                    save_dict['bin_path'] = data['bin_path']
-                if data['pkl_path'] is not None:
-                    save_dict['pkl_path'] = data['pkl_path']
-                
-                torch.save(save_dict, save_path)
-        
-        # 可选: 打印进度
-        if batch_idx % 10 == 0:
-            pl_module.print(f"[SegmentationWriter] Batch {batch_idx}: 保存了 {len(file_groups)} 个文件的预测")
-
-    def on_predict_end(self, trainer: 'pl.Trainer', pl_module: 'pl.LightningModule'):
-        """
-        在整个预测结束后触发，对所有 bin 文件执行投票和保存
-        
-        此方法会:
-        1. 按 bin 文件分组所有临时预测文件
-        2. 对每个 bin 文件执行投票 (logits 平均)
-        3. 从原始 bin/pkl 加载完整点云数据
-        4. 保存为 .las 文件
-        5. 清理临时文件
-        """
-        
-        # 如果 num_classes 未指定，从 Task 推断
-        if self.num_classes == -1:
-            try:
-                # 尝试多种方式推断类别数
-                if hasattr(pl_module, 'head'):
-                    if hasattr(pl_module.head, 'out_channels'):
-                        self.num_classes = pl_module.head.out_channels
-                    elif hasattr(pl_module.head, 'num_classes'):
-                        self.num_classes = pl_module.head.num_classes
-                    else:
-                        raise AttributeError("head 没有 out_channels 或 num_classes 属性")
-                elif hasattr(pl_module, 'num_classes'):
-                    self.num_classes = pl_module.num_classes
-                else:
-                    raise AttributeError("无法找到 num_classes")
-                pl_module.print(f"[SegmentationWriter] 从模型推断类别数: {self.num_classes}")
-            except Exception as e:
-                print(f"错误: 无法从模型推断 num_classes: {e}")
-                print("请在初始化 SegmentationWriter 时显式指定 num_classes")
-                return
-
-        pl_module.print(f"\n[SegmentationWriter] 预测完成，开始拼接和投票...")
-        
-        # 1. 查找所有临时文件
-        tmp_files = sorted(glob.glob(os.path.join(self.temp_dir, "*.pred.tmp")))
-        
-        if not tmp_files:
-            pl_module.print("[SegmentationWriter] 警告: 未找到临时预测文件")
-            return
-        
-        pl_module.print(f"[SegmentationWriter] 找到 {len(tmp_files)} 个临时预测文件")
-        
-        # 2. 按 bin 文件分组临时文件
-        # 文件名格式: {bin_basename}_batch_{batch_idx}.pred.tmp
-        bin_file_groups = defaultdict(list)
-        
-        for tmp_file in tmp_files:
-            filename = os.path.basename(tmp_file)
-            # 提取 bin_basename (去除 _batch_xxx.pred.tmp 部分)
-            bin_basename = filename.split('_batch_')[0]
-            bin_file_groups[bin_basename].append(tmp_file)
-        
-        pl_module.print(f"[SegmentationWriter] 检测到 {len(bin_file_groups)} 个唯一 bin 文件")
-        
-        # 3. 对每个 bin 文件执行投票和保存
-        for bin_basename, tmp_file_list in bin_file_groups.items():
-            pl_module.print(f"\n[SegmentationWriter] 处理 bin 文件: {bin_basename} ({len(tmp_file_list)} 个批次)")
             
+        # 保存
+        for bin_basename, data in file_groups.items():
+            if not data['logits']: continue
+            
+            save_path = os.path.join(self.temp_dir, f"{bin_basename}_batch_{batch_idx}.pred.tmp")
+            save_dict = {
+                'logits': torch.cat(data['logits'], dim=0),
+                'indices': torch.cat(data['indices'], dim=0),
+                'bin_file': bin_basename,
+            }
+            if data['bin_path']: save_dict['bin_path'] = data['bin_path']
+            if data['pkl_path']: save_dict['pkl_path'] = data['pkl_path']
+            
+            torch.save(save_dict, save_path)
+            
+        if batch_idx % 10 == 0:
+            pl_module.print(f"[SemanticPredictLasWriter] Batch {batch_idx}: 保存了 {len(file_groups)} 个文件的预测")
+
+    def _ensure_num_classes(self, pl_module):
+        if self.num_classes != -1: return
+        
+        try:
+            if hasattr(pl_module, 'head'):
+                if hasattr(pl_module.head, 'out_channels'):
+                    self.num_classes = pl_module.head.out_channels
+                elif hasattr(pl_module.head, 'num_classes'):
+                    self.num_classes = pl_module.head.num_classes
+            elif hasattr(pl_module, 'num_classes'):
+                self.num_classes = pl_module.num_classes
+            pl_module.print(f"[SemanticPredictLasWriter] 从模型推断类别数: {self.num_classes}")
+        except Exception:
+            print("错误: 无法从模型推断 num_classes，请显式指定")
+
+    def _group_temp_files(self, tmp_files):
+        groups = defaultdict(list)
+        for f in tmp_files:
+            basename = os.path.basename(f).split('_batch_')[0]
+            groups[basename].append(f)
+        return groups
+
+    def _cleanup_temp_files(self, tmp_files, pl_module):
+        pl_module.print(f"\n[SemanticPredictLasWriter] 清理临时文件...")
+        for f in tmp_files:
             try:
-                self._process_single_bin_file(
-                    bin_basename=bin_basename,
-                    tmp_files=tmp_file_list,
-                    trainer=trainer,
-                    pl_module=pl_module
-                )
+                if os.path.exists(f): os.remove(f)
             except Exception as e:
-                pl_module.print(f"!!! 错误: 处理 {bin_basename} 时失败: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"警告: 无法删除 {f}: {e}")
         
-        # 4. 清理所有临时文件
-        pl_module.print(f"\n[SegmentationWriter] 清理临时文件...")
-        for tmp_file in tmp_files:
-            try:
-                os.remove(tmp_file)
-            except Exception as e:
-                print(f"警告: 无法删除临时文件 {tmp_file}: {e}")
-        
-        pl_module.print(f"[SegmentationWriter] 所有预测已保存到 {self.output_dir}")
-        
-        # 删除临时文件夹
         try:
             import shutil
             if os.path.exists(self.temp_dir):
                 shutil.rmtree(self.temp_dir)
-                pl_module.print(f"[SegmentationWriter] 已清理临时文件夹: {self.temp_dir}")
+                pl_module.print(f"[SemanticPredictLasWriter] 已清理临时文件夹")
         except Exception as e:
-            pl_module.print(f"[SegmentationWriter] 警告: 清理临时文件夹失败: {e}")
-        
+            pl_module.print(f"警告: 清理文件夹失败: {e}")
+        pl_module.print(f"[SemanticPredictLasWriter] 所有预测已保存到 {self.output_dir}")
         pl_module.print("="*70)
-    
-    def _process_single_bin_file(
-        self,
-        bin_basename: str,
-        tmp_files: List[str],
-        trainer: 'pl.Trainer',
-        pl_module: 'pl.LightningModule'
-    ):
-        """
-        处理单个 bin 文件的所有预测批次
-        
-        执行步骤:
-        1. 从临时文件加载所有预测并执行投票
-        2. 从原始 bin/pkl 文件加载完整点云数据
-        3. 应用类别映射 (如果有)
-        4. 保存为 .las 文件
-        5. (可选) 保存 logits 到 .npz
-        
-        Args:
-            bin_basename: bin 文件的基础名称 (不带扩展名)
-            tmp_files: 该 bin 文件的所有临时预测文件列表
-            trainer: PyTorch Lightning Trainer
-            pl_module: PyTorch Lightning Module
-        """
-        
-        # 1. 🔥 优先从临时文件中获取完整路径信息
-        bin_path, pkl_path = None, None
-        
-        # 尝试从第一个临时文件中读取路径信息
-        if len(tmp_files) > 0:
-            try:
-                first_tmp = torch.load(tmp_files[0])
-                if 'bin_path' in first_tmp and 'pkl_path' in first_tmp:
-                    # 从临时文件中直接获取路径
-                    bin_path_list = first_tmp['bin_path']
-                    pkl_path_list = first_tmp['pkl_path']
-                    
-                    # 处理列表情况（collate_fn 可能保持为列表）
-                    if isinstance(bin_path_list, list):
-                        bin_path = str(Path(bin_path_list[0]))
-                        pkl_path = str(Path(pkl_path_list[0]))
-                    else:
-                        bin_path = str(Path(bin_path_list))
-                        pkl_path = str(Path(pkl_path_list))
-                    
-                    pl_module.print(f"  - 从临时文件获取路径 ✓")
-            except Exception as e:
-                pl_module.print(f"  - 从临时文件获取路径失败: {e}")
-        
-        # 2. 如果没有从临时文件获取到，使用旧的查找方法（后备方案）
-        if bin_path is None or pkl_path is None:
-            pl_module.print(f"  - 使用后备方案查找文件...")
-            bin_path, pkl_path = self._find_bin_pkl_paths(bin_basename, trainer)
-        
-        if bin_path is None or pkl_path is None:
-            pl_module.print(f"错误: 无法找到 {bin_basename} 对应的 bin/pkl 文件")
-            return
-        
-        pl_module.print(f"  - Bin 文件: {bin_path}")
-        pl_module.print(f"  - Pkl 文件: {pkl_path}")
-        
-        # 2. 从 pkl 加载元数据
+
+    def _process_single_bin_file(self, bin_basename, tmp_files, trainer, pl_module):
+        # 1. 获取路径
+        bin_path, pkl_path = self._get_file_paths(bin_basename, tmp_files, trainer, pl_module)
+        if not bin_path or not pkl_path: return
+
+        # 2. 加载元数据和点云
         with open(pkl_path, 'rb') as f:
             metadata = pickle.load(f)
-        
-        # 3. 使用 memmap 加载完整点云数据
         point_data = np.memmap(bin_path, dtype=metadata['dtype'], mode='r')
-        num_total_points = len(point_data)
+        num_points = len(point_data)
         
-        pl_module.print(f"  - 总点数: {num_total_points:,}")
+        # 3. 投票
+        final_preds, mean_logits, counts = self._perform_voting(tmp_files, num_points, pl_module)
         
-        # 4. 创建投票数组
-        logits_sum = torch.zeros((num_total_points, self.num_classes), dtype=torch.float32)
-        counts = torch.zeros(num_total_points, dtype=torch.int32)
-        
-        # 5. 加载所有临时文件并累积投票
-        pl_module.print(f"  - 加载 {len(tmp_files)} 个预测批次...")
-        
-        for tmp_file in tmp_files:
-            try:
-                pred_data = torch.load(tmp_file)
-                indices = pred_data['indices']  # [N]
-                logits = pred_data['logits']    # [N, C]
-                
-                # 累积 logits
-                logits_sum.index_add_(0, indices.long(), logits)
-                counts.index_add_(0, indices.long(), torch.ones(len(indices), dtype=torch.int32))
-                
-            except Exception as e:
-                pl_module.print(f"    警告: 加载 {tmp_file} 失败: {e}")
-        
-        # 6. 计算平均 logits 和最终预测
-        pl_module.print(f"  - 计算最终预测...")
-        
-        # 处理未被预测的点
-        unpredicted_mask = (counts == 0)
-        counts[unpredicted_mask] = 1  # 避免除以 0
-        
-        # 平均 logits
-        mean_logits = logits_sum / counts.unsqueeze(-1)
-        
-        # 🔥 新增：智能判断是否需要 argmax
-        # 如果 mean_logits 是 [N, C] 的 logits，则需要 argmax
-        # 如果 mean_logits 是 [N] 的 labels，则直接使用
-        if mean_logits.ndim == 2 and mean_logits.size(1) > 1:
-            # [N, C] logits -> argmax 获取类别
-            final_preds = torch.argmax(mean_logits, dim=1).numpy().astype(np.uint8)
-        elif mean_logits.ndim == 2 and mean_logits.size(1) == 1:
-            # [N, 1] -> squeeze 为 [N]
-            final_preds = mean_logits.squeeze(-1).numpy().astype(np.uint8)
-        else:
-            # [N] labels -> 直接使用
-            final_preds = mean_logits.numpy().astype(np.uint8)
-        
-        # 对未预测的点赋值 (使用 0 或 ignore_label)
-        if unpredicted_mask.any():
-            num_unpredicted = unpredicted_mask.sum().item()
-            pl_module.print(f"    警告: {num_unpredicted} 个点未被预测，将赋予标签 0")
-            final_preds[unpredicted_mask.numpy()] = 0
-        
-        # 🔥 调试：打印映射前的类别分布
-        pl_module.print(f"  - 映射前类别分布（连续标签 0-{self.num_classes-1}）:")
-        pred_counts = np.bincount(final_preds, minlength=self.num_classes)
-        for i, count in enumerate(pred_counts):
-            if count > 0:
-                pl_module.print(f"    类别 {i}: {count:8d} 点 ({count/len(final_preds)*100:5.2f}%)")
-        
-        # 7. 应用反向类别映射 (如果有)
-        if self.reverse_class_mapping is not None:
-            pl_module.print(f"  - 应用反向类别映射: {self.reverse_class_mapping}")
+        # 4. 映射
+        if self.reverse_class_mapping:
+            final_preds = self._apply_mapping(final_preds, pl_module)
             
-            # 🔥 修复：使用向量化映射，避免 np.zeros_like 的bug
-            # 创建映射数组（索引 = 连续标签，值 = 原始标签）
-            max_continuous_label = max(self.reverse_class_mapping.keys())
-            mapping_array = np.arange(max_continuous_label + 1)  # 默认保持不变
-            
-            for continuous_label, original_label in self.reverse_class_mapping.items():
-                mapping_array[continuous_label] = original_label
-            
-            # 向量化映射
-            final_preds_mapped = mapping_array[final_preds]
-            
-            # 🔥 调试：打印映射后的类别分布
-            pl_module.print(f"  - 映射后类别分布（原始标签）:")
-            unique_labels = np.unique(final_preds_mapped)
-            for label in unique_labels:
-                count = (final_preds_mapped == label).sum()
-                pl_module.print(f"    标签 {label}: {count:8d} 点 ({count/len(final_preds_mapped)*100:5.2f}%)")
-            
-            final_preds = final_preds_mapped
+        # 5. 保存 LAS
+        xyz = np.stack([point_data['X'], point_data['Y'], point_data['Z']], axis=1).astype(np.float64)
+        metadata['_bin_path'] = bin_path
         
-        # 8. 提取坐标 (XYZ)
-        xyz = np.stack([
-            point_data['X'],
-            point_data['Y'],
-            point_data['Z']
-        ], axis=1).astype(np.float64)
+        self._save_las_file(
+            os.path.join(self.output_dir, f"{bin_basename}.las"),
+            xyz, final_preds, metadata, pl_module
+        )
         
-        # 9. 保存为 .las 文件（包含所有原始属性）
-        final_las_path = os.path.join(self.output_dir, f"{bin_basename}.las")
-        
-        try:
-            # 将 bin_path 添加到 metadata 中，方便 _save_las_file 加载原始数据
-            metadata['_bin_path'] = bin_path
-            
-            self._save_las_file(
-                las_path=final_las_path,
-                xyz=xyz,
-                classification=final_preds,
-                metadata=metadata,
-                pl_module=pl_module
-            )
-            pl_module.print(f"  ✓ 已保存到: {final_las_path}")
-            
-        except Exception as e:
-            pl_module.print(f"  !!! 错误: 保存 .las 文件失败: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        # 10. (可选) 保存 logits
+        # 6. 保存 Logits
         if self.save_logits:
-            logits_path = os.path.join(self.output_dir, f"{bin_basename}_logits.npz")
             np.savez_compressed(
-                logits_path,
+                os.path.join(self.output_dir, f"{bin_basename}_logits.npz"),
                 logits=mean_logits.numpy(),
                 predictions=final_preds,
                 counts=counts.numpy()
             )
-            pl_module.print(f"  ✓ Logits 已保存到: {logits_path}")
-    
+
+    def _get_file_paths(self, bin_basename, tmp_files, trainer, pl_module):
+        # 尝试从临时文件获取
+        if tmp_files:
+            try:
+                data = torch.load(tmp_files[0])
+                if 'bin_path' in data and 'pkl_path' in data:
+                    bp = data['bin_path']
+                    pp = data['pkl_path']
+                    return (str(bp[0]) if isinstance(bp, list) else str(bp)), \
+                           (str(pp[0]) if isinstance(pp, list) else str(pp))
+            except Exception:
+                pass
+        
+        # 后备方案
+        return self._find_bin_pkl_paths(bin_basename, trainer)
+
+    def _perform_voting(self, tmp_files, num_points, pl_module):
+        logits_sum = torch.zeros((num_points, self.num_classes), dtype=torch.float32)
+        counts = torch.zeros(num_points, dtype=torch.int32)
+        
+        for f in tmp_files:
+            try:
+                d = torch.load(f)
+                # 确保 float32
+                logits_sum.index_add_(0, d['indices'].long(), d['logits'].float())
+                counts.index_add_(0, d['indices'].long(), torch.ones(len(d['indices']), dtype=torch.int32))
+            except Exception as e:
+                pl_module.print(f"    警告: 加载 {f} 失败: {e}")
+                
+        # 计算平均
+        mask = (counts == 0)
+        counts[mask] = 1
+        mean_logits = logits_sum / counts.unsqueeze(-1)
+        
+        # Argmax
+        if mean_logits.ndim == 2 and mean_logits.size(1) > 1:
+            preds = torch.argmax(mean_logits, dim=1).numpy().astype(np.uint8)
+        else:
+            preds = mean_logits.squeeze().numpy().astype(np.uint8)
+            
+        if mask.any():
+            preds[mask.numpy()] = 0
+            
+        return preds, mean_logits, counts
+
+    def _apply_mapping(self, preds, pl_module):
+        pl_module.print(f"  - 应用反向类别映射")
+        max_label = max(self.reverse_class_mapping.keys())
+        mapping = np.arange(max_label + 1)
+        for k, v in self.reverse_class_mapping.items():
+            mapping[k] = v
+        return mapping[preds]
+
     def _find_bin_pkl_paths(self, bin_basename: str, trainer: 'pl.Trainer') -> tuple:
         """
         根据 bin_basename 查找对应的 bin 和 pkl 文件路径
@@ -771,80 +563,128 @@ class SegmentationWriter(BasePredictionWriter):
             traceback.print_exc()
             raise
 
+
 class AutoEmptyCacheCallback(Callback):
     """
-    自动显存清理回调函数 (增强版)
+    自动显存清理回调函数
     
-    功能：
-    1. 绝对阈值检测：单次 Batch 耗时超过设定秒数，立即清理（防止开局即慢）
-    2. 相对阈值检测：耗时突增超过平均值 N 倍，立即清理（防止中途突发）
-    3. 定期清理：兜底机制
+    逻辑：
+    1. 定期清理：作为兜底。
+    2. 智能检测：一旦发现当前 Batch 耗时异常（绝对或相对），立即清理。
+    3. 无冷却期：只要慢，就尝试救，优先保证速度恢复。
     """
     def __init__(
         self, 
-        slowdown_threshold: float = 3.0,   # 相对阈值：当前耗时 > 平均值 * N
-        absolute_threshold: float = None,  # 绝对阈值 (秒)：当前耗时 > N 秒 (建议设为正常Batch耗时的2-3倍)
-        clear_interval: int = 0,           # 定期清理间隔 (0表示禁用)
-        warmup_steps: int = 50,            # 相对检测的预热步数
+        slowdown_threshold: float = 3.0,   # 相对阈值
+        absolute_threshold: float = None,  # 绝对阈值 (秒)
+        clear_interval: int = 0,           # 定期清理
+        warmup_steps: int = 50,            # 预热步数
         verbose: bool = True
     ):
         super().__init__()
-        self.slowdown_threshold = slowdown_threshold
-        self.absolute_threshold = absolute_threshold
-        self.clear_interval = clear_interval
-        self.warmup_steps = warmup_steps
+        self.config = {
+            'slowdown': slowdown_threshold,
+            'absolute': absolute_threshold,
+            'interval': clear_interval,
+            'warmup': warmup_steps
+        }
         self.verbose = verbose
         
-        self._start_time = 0.0
-        self._avg_time = 0.0
-        self._alpha = 0.05  # EMA 平滑系数
-        self._last_clear_step = -100  # 初始化为负数，确保刚开始也能触发
+        # 状态追踪
+        self.states = {} 
 
-    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
-        self._start_time = time.time()
+    def _get_state(self, stage):
+        if stage not in self.states:
+            self.states[stage] = {
+                'start_time': 0.0,
+                'avg_time': 0.0
+            }
+        return self.states[stage]
 
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        duration = time.time() - self._start_time
+    def _on_batch_start(self, stage):
+        state = self._get_state(stage)
+        state['start_time'] = time.time()
+
+    def _on_batch_end(self, trainer, batch_idx, stage):
+        state = self._get_state(stage)
+        duration = time.time() - state['start_time']
+        
+        # Train阶段用 global_step, 其他阶段用 batch_idx (仅用于日志显示)
+        current_step = trainer.global_step if stage == 'train' else batch_idx
         
         should_clear = False
         reason = ""
 
-        # 1. 策略一：绝对时长阈值 (最高优先级，不受预热影响)
-        # 解决 "开局即慢" 或 "一直慢" 的问题
-        if self.absolute_threshold is not None and duration > self.absolute_threshold:
-            # 防止过于频繁触发（例如每个batch都超），设置最小间隔（例如5个batch）
-            if batch_idx - self._last_clear_step > 5:
-                should_clear = True
-                reason = f"absolute limit ({duration:.2f}s > {self.absolute_threshold}s)"
+        # =========================================================
+        # 核心逻辑
+        # =========================================================
 
-        # 2. 策略二：相对时长检测 (需预热)
-        # 解决 "突然变慢" 的问题
-        elif (batch_idx > self.warmup_steps and 
-              self._avg_time > 0 and 
-              duration > self._avg_time * self.slowdown_threshold):
-            
-            if batch_idx - self._last_clear_step > 5:
-                should_clear = True
-                reason = f"slowdown detected ({duration:.2f}s vs avg {self._avg_time:.2f}s)"
-
-        # 3. 策略三：定期清理 (兜底)
-        elif self.clear_interval > 0 and (batch_idx + 1) % self.clear_interval == 0:
+        # 1. 优先检查定期清理
+        if self.config['interval'] > 0 and (batch_idx + 1) % self.config['interval'] == 0:
             should_clear = True
             reason = "periodic"
+            
+        # 2. 智能检测 (如果没有触发定期清理)
+        else:
+            # 判断是否已预热 (有历史平均值 或 超过预热步数)
+            is_warmed_up = (state['avg_time'] > 0) or (batch_idx > self.config['warmup'])
+            
+            # A. 相对检测: 比平均值慢 N 倍
+            if (is_warmed_up and 
+                state['avg_time'] > 0 and 
+                duration > state['avg_time'] * self.config['slowdown']):
+                should_clear = True
+                reason = f"slowdown ({duration:.2f}s vs avg {state['avg_time']:.2f}s)"
+            
+            # B. 绝对检测: 超过 N 秒
+            elif (self.config['absolute'] is not None and 
+                  duration > self.config['absolute']):
+                should_clear = True
+                reason = f"absolute limit ({duration:.2f}s > {self.config['absolute']}s)"
 
-        # 执行清理
+        # =========================================================
+        # 执行动作
+        # =========================================================
         if should_clear:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-                self._last_clear_step = batch_idx
                 if self.verbose:
-                    trainer.print(f"\n[AutoCache] 🧹 CUDA cache cleared at step {batch_idx}. Reason: {reason}")
-        
-        # 更新移动平均耗时
-        # 注意：如果当前 batch 触发了清理（说明它是不正常的慢），我们通常不希望它大幅污染平均值
-        # 所以如果是异常慢的 batch，我们可以选择不更新 avg，或者赋予极小的权重
+                    stage_name = stage.upper()
+                    step_info = f"global_step={current_step}" if stage == 'train' else f"batch={batch_idx}"
+                    trainer.print(f"\n[AutoCache][{stage_name}] 🧹 Cleared at {step_info}. Reason: {reason}")
+
+        # 更新平均值 (EMA)
+        # 策略：只有在【未触发清理】(即认为是正常Batch) 时才更新平均值
+        # 这样可以防止异常慢的 Batch 污染平均值，保持检测的敏锐度
         if not should_clear:
-            if self._avg_time == 0:
-                self._avg_time = duration
+            if state['avg_time'] == 0:
+                state['avg_time'] = duration
             else:
-                self._avg_time = self._avg_time * (1 - self._alpha) + duration * self._alpha
+                # alpha = 0.05
+                state['avg_time'] = state['avg_time'] * 0.95 + duration * 0.05
+
+    # ================= 钩子绑定 (保持不变) =================
+    
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+        self._on_batch_start('train')
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        self._on_batch_end(trainer, batch_idx, 'train')
+
+    def on_validation_batch_start(self, trainer, pl_module, batch, batch_idx, dataloader_idx=0):
+        self._on_batch_start('val')
+
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
+        self._on_batch_end(trainer, batch_idx, 'val')
+
+    def on_test_batch_start(self, trainer, pl_module, batch, batch_idx, dataloader_idx=0):
+        self._on_batch_start('test')
+
+    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
+        self._on_batch_end(trainer, batch_idx, 'test')
+
+    def on_predict_batch_start(self, trainer, pl_module, batch, batch_idx, dataloader_idx=0):
+        self._on_batch_start('predict')
+
+    def on_predict_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
+        self._on_batch_end(trainer, batch_idx, 'predict')

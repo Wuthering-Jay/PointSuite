@@ -58,7 +58,7 @@ class BaseTask(pl.LightningModule):
             class_mapping (Dict[int, int]): 
                 原始类别标签 -> 连续类别标签的映射
                 例如: {0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
-                此映射将被保存到 checkpoint，并在预测时自动加载到 SegmentationWriter
+                此映射将被保存到 checkpoint，并在预测时自动加载到 SemanticPredictLasWriter
                 如果为 None，表示不使用类别映射
                 
             class_names (List[str]): 
@@ -68,9 +68,11 @@ class BaseTask(pl.LightningModule):
         """
         super().__init__()
         # 将超参数保存到 checkpoint
-        self.save_hyperparameters("learning_rate", "class_mapping", "class_names")
+        # 🔥 关键修改：保存所有参数，包括 loss_configs 和 metric_configs
+        # 这样 load_from_checkpoint 才能正确重建 Task
+        self.save_hyperparameters()
         
-        # 保存 class_mapping 用于 SegmentationWriter
+        # 保存 class_mapping 用于 SemanticPredictLasWriter
         self.class_mapping = class_mapping
         
         # 追踪最佳 mIoU
@@ -474,7 +476,7 @@ class BaseTask(pl.LightningModule):
         测试步骤：计算损失和指标
         
         注意：
-        - 与 validation 类似，但可以通过回调（如 SegmentationWriter）保存预测结果
+        - 与 validation 类似，但可以通过回调（如 SemanticPredictLasWriter）保存预测结果
         - 如果需要保存预测结果，应该使用 Trainer.test() 并配置回调
         - 如果不需要保存结果，只是评估指标，使用 Trainer.validate()
         """
