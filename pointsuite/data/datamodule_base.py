@@ -265,7 +265,7 @@ class DataModuleBase(pl.LightningDataModule, ABC):
             # 从数据集自动计算类别权重
             print("自动从数据集计算类别权重...")
             class_weights_dict = dataset.compute_class_weights(
-                method='inverse',
+                method='log_inverse',
                 smooth=1.0,
                 normalize=True
             )

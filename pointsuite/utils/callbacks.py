@@ -10,6 +10,7 @@ from pathlib import Path
 from collections import defaultdict
 import time
 from pytorch_lightning.callbacks import Callback
+import datetime
 
 
 # 导入 laspy (您需要 'pip install laspy')
@@ -691,3 +692,148 @@ class AutoEmptyCacheCallback(Callback):
 
     def on_predict_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
         self._on_batch_end(trainer, batch_idx, 'predict')
+
+
+class TextLoggingCallback(Callback):
+    """
+    A simple callback that logs training/validation/test/prediction progress as text lines.
+    Replaces dynamic progress bars to avoid display issues.
+    """
+    def __init__(self, log_interval: int = 10):
+        super().__init__()
+        self.log_interval = log_interval
+        self.stage_start_time = 0.0
+
+    def _reset_timer(self):
+        self.stage_start_time = time.time()
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        self._reset_timer()
+        print(f"\n{'='*40}\nEpoch {trainer.current_epoch} Started\n{'='*40}")
+
+    def on_validation_epoch_start(self, trainer, pl_module):
+        self._reset_timer()
+        print(f"\n{'='*40}\nValidation Started\n{'='*40}")
+    
+    def on_test_epoch_start(self, trainer, pl_module):
+        self._reset_timer()
+        print(f"\n{'='*40}\nTest Started\n{'='*40}")
+
+    def on_predict_epoch_start(self, trainer, pl_module):
+        self._reset_timer()
+        print(f"\n{'='*40}\nPrediction Started\n{'='*40}")
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        self._log_batch(trainer, pl_module, batch, batch_idx, stage="Train")
+
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
+        self._log_batch(trainer, pl_module, batch, batch_idx, stage="Val")
+
+    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
+        self._log_batch(trainer, pl_module, batch, batch_idx, stage="Test")
+
+    def on_predict_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
+        self._log_batch(trainer, pl_module, batch, batch_idx, stage="Pred")
+
+    def _log_batch(self, trainer, pl_module, batch, batch_idx, stage):
+        if (batch_idx + 1) % self.log_interval != 0:
+            return
+
+        # 1. Basic Info
+        current_batch = batch_idx + 1
+        
+        # Total Batches
+        total_batches = 0
+        if stage == "Train":
+            total_batches = trainer.num_training_batches
+        elif stage == "Val":
+            total_batches = sum(trainer.num_val_batches) if isinstance(trainer.num_val_batches, list) else trainer.num_val_batches
+        elif stage == "Test":
+            total_batches = sum(trainer.num_test_batches) if isinstance(trainer.num_test_batches, list) else trainer.num_test_batches
+        elif stage == "Pred":
+            total_batches = sum(trainer.num_predict_batches) if isinstance(trainer.num_predict_batches, list) else trainer.num_predict_batches
+            
+        # Epoch Info
+        max_epochs = trainer.max_epochs if trainer.max_epochs is not None else "?"
+        epoch_str = f"[{trainer.current_epoch}/{max_epochs}]"
+
+        # 2. Time Calculation
+        now = time.time()
+        if self.stage_start_time == 0.0: self.stage_start_time = now # Safety
+        elapsed_sec = now - self.stage_start_time
+        
+        avg_time = 0.0
+        remaining_str = "?"
+        if current_batch > 0:
+            avg_time = elapsed_sec / current_batch
+            if isinstance(total_batches, (int, float)) and total_batches > 0 and total_batches >= current_batch:
+                 remaining_sec = avg_time * (total_batches - current_batch)
+                 remaining_str = str(datetime.timedelta(seconds=int(remaining_sec)))
+        
+        elapsed_str = str(datetime.timedelta(seconds=int(elapsed_sec)))
+
+        # 3. Batch Data Info
+        batch_size = 0
+        num_points = 0
+        if isinstance(batch, dict):
+            batch_size = len(batch.get('offset', [])) if 'offset' in batch else 1
+            coord = batch.get('coord', None)
+            if coord is not None:
+                num_points = coord.shape[0]
+        
+        pts_str = str(num_points)
+        if num_points >= 1_000_000:
+            pts_str = f"{num_points/1_000_000:.1f}M"
+        elif num_points >= 1_000:
+            pts_str = f"{num_points/1_000:.0f}K"
+
+        # 4. Learning Rate
+        lr_str = ""
+        if stage == "Train" and trainer.optimizers:
+            try:
+                lr = trainer.optimizers[0].param_groups[0]['lr']
+                lr_str = f", lr={lr:.2e}"
+            except:
+                pass
+
+        # 5. Metrics (Losses)
+        metrics_str = ""
+        if stage != "Pred":
+            metrics_str_parts = []
+            
+            # For Train, we prioritize 'live_loss' or 'total_loss_step'
+            if stage == "Train":
+                loss_val = None
+                if hasattr(trainer, 'live_loss'):
+                     loss_val = trainer.live_loss
+                elif "total_loss_step" in trainer.callback_metrics:
+                     loss_val = trainer.callback_metrics["total_loss_step"].item()
+                
+                if loss_val is not None:
+                    metrics_str_parts.append(f"loss={loss_val:.4f}")
+
+                # Add other step metrics
+                for k, v in trainer.callback_metrics.items():
+                    if k.endswith("_step") and k != "total_loss_step" and "val" not in k and "test" not in k:
+                        name = k.replace("_step", "").replace("train_", "")
+                        if name == "ce_loss": name = "CE"
+                        elif name == "lovasz_loss": name = "LOV"
+                        val = v.item() if hasattr(v, 'item') else v
+                        metrics_str_parts.append(f"{name}={val:.4f}")
+            
+            else:
+                # For Val/Test, show whatever is available in callback_metrics that matches the stage
+                prefix = "val" if stage == "Val" else "test"
+                for k, v in trainer.callback_metrics.items():
+                    if k.startswith(prefix) and "loss" in k:
+                         name = k.replace(f"{prefix}_", "")
+                         val = v.item() if hasattr(v, 'item') else v
+                         metrics_str_parts.append(f"{name}={val:.4f}")
+
+            if metrics_str_parts:
+                metrics_str = ", " + ", ".join(metrics_str_parts)
+
+        # Print
+        print(f"[{stage}] {epoch_str} [{current_batch}/{total_batches}] "
+              f"{elapsed_str}<{remaining_str}, {avg_time:.2f}s/it"
+              f"{lr_str}{metrics_str}, bs={batch_size}, pts={pts_str}")

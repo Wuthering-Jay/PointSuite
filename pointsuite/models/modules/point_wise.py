@@ -69,7 +69,7 @@ class GroupedVectorAttention(nn.Module):
         qkv_bias=True,
         pe_multiplier=False,
         pe_bias=True,
-        norm_layer=PointLayerNorm,
+        norm_layer=PointBatchNorm,
     ):
         super(GroupedVectorAttention, self).__init__()
         self.embed_channels = embed_channels
@@ -129,8 +129,8 @@ class GroupedVectorAttention(nn.Module):
         )
         
         # pointops.grouping 只支持 FP32 输入，输出让 autocast 管理
-        key = pointops.grouping(reference_index, key.float(), coord.float(), with_xyz=True) # [n, k, 3+c]
-        value = pointops.grouping(reference_index, value.float(), coord.float(), with_xyz=False) # [n, k, c]
+        key = pointops.grouping(reference_index.detach(), key.float(), coord.float(), with_xyz=True) # [n, k, 3+c]
+        value = pointops.grouping(reference_index.detach(), value.float(), coord.float(), with_xyz=False) # [n, k, c]
         pos, key = key[:, :, 0:3], key[:, :, 3:] # [n, k, 3], [n, k, c]
         relation_qk = key - query.unsqueeze(1) # [n, k ,c], 邻域内与中心点的相对位置, 用于相对位置编码
         if self.pe_multiplier: # 乘性因子
@@ -156,7 +156,7 @@ class GroupedVectorAttention(nn.Module):
     
 
 class PointNetLayer(nn.Module):
-    def __init__(self, in_channels, out_channels, norm_layer=PointLayerNorm, k_neighbors=16):
+    def __init__(self, in_channels, out_channels, norm_layer=PointBatchNorm, k_neighbors=16):
         """
         使用 Linear 层和 PointBatchNorm 的 PointNet 层实现
         
@@ -206,73 +206,7 @@ class PointNetLayer(nn.Module):
     
 
  # ———— 池化层 ————
-
- # ... (之前的导入保持不变)
-
 class GridPool(nn.Module):
-    """
-    Partition-based Pooling (Grid Pooling)
-    """
-    def __init__(self, in_channels, out_channels, grid_size, bias=False):
-        super(GridPool, self).__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.grid_size = grid_size
-
-        self.fc = nn.Linear(in_channels, out_channels, bias=bias)
-        self.norm = PointLayerNorm(out_channels)
-        self.act = nn.ReLU(inplace=True)
-
-    def forward(self, points, start=None):
-        """
-        input: points: [pxo], [[n,3],[n,c],[b]], start: [b, 3]
-        output: points: [pxo], [[v,3],[v,c],[b]], cluster: [n]
-        """
-        coord, feat, offset = points
-        batch = offset2batch(offset)
-        
-        # 1. 确保 feat 计算在自动混合精度下进行
-        feat = self.act(self.norm(self.fc(feat)))
-        
-        # 2. 坐标计算必须使用 FP32
-        coord_fp32 = coord.float()
-        
-        with torch.no_grad():
-            start = (
-                segment_csr(
-                    coord_fp32,
-                    torch.cat([batch.new_zeros(1), torch.cumsum(batch.bincount(), dim=0)]),
-                    reduce="min",
-                )
-                if start is None
-                else start
-            )
-        
-        cluster = voxel_grid(
-            pos=coord_fp32 - start[batch], size=self.grid_size, batch=batch, start=0
-        )
-        unique, cluster, counts = torch.unique(
-            cluster, sorted=True, return_inverse=True, return_counts=True
-        )
-        
-        # 获取排序索引
-        _, sorted_cluster_indices = torch.sort(cluster)
-        idx_ptr = torch.cat([counts.new_zeros(1), torch.cumsum(counts, dim=0)])
-        
-        # 3. 池化操作
-        coord = segment_csr(coord_fp32[sorted_cluster_indices], idx_ptr, reduce="mean")
-        feat = segment_csr(feat[sorted_cluster_indices], idx_ptr, reduce="max")
-        
-        # 🔥 [修复 1] 正确更新 batch 索引 (先重排再切片)
-        batch = batch[sorted_cluster_indices][idx_ptr[:-1]]
-        
-        # 🔥 [修复 2] 强制 offset 为 int32 !!! (这是最关键的一步)
-        offset = batch2offset(batch).int()
-        
-        return [coord, feat, offset], cluster
-
-        
-class GridPool1(nn.Module):
     """
     Partition-based Pooling (Grid Pooling)
     格网池化，基于体素划分进行池化下采样，体素内坐标平均池化，特征最大池化，得到新的pxo，同时输出体素索引
@@ -283,14 +217,14 @@ class GridPool1(nn.Module):
         bias: fc层偏置
     """
 
-    def __init__(self, in_channels, out_channels, grid_size, bias=False):
-        super(GridPool1, self).__init__()
+    def __init__(self, in_channels, out_channels, grid_size, bias=False, norm_layer=PointBatchNorm):
+        super(GridPool, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.grid_size = grid_size
 
         self.fc = nn.Linear(in_channels, out_channels, bias=bias)
-        self.norm = PointLayerNorm(out_channels)
+        self.norm = norm_layer(out_channels)
         self.act = nn.ReLU(inplace=True)
 
     def forward(self, points, start=None):
@@ -302,39 +236,34 @@ class GridPool1(nn.Module):
         batch = offset2batch(offset) # [b] -> [n]
         feat = self.act(self.norm(self.fc(feat))) # [n, c]
         
-        # 坐标操作需要 FP32 精度，但不禁用 autocast
-        # 只在需要时转换 coord 到 FP32，让 feat 保持 autocast 的类型
-        coord_fp32 = coord.float()
-        
-        # 计算 start (batch 内每个样本的最小坐标)
+        # 这些操作不需要梯度
         with torch.no_grad():
             start = (
                 segment_csr(
-                    coord_fp32,
+                    coord,
                     torch.cat([batch.new_zeros(1), torch.cumsum(batch.bincount(), dim=0)]),
                     reduce="min",
                 )
                 if start is None
                 else start
             )
+            cluster = voxel_grid(
+                pos=coord - start[batch], size=self.grid_size, batch=batch, start=0
+            )
+            unique, cluster, counts = torch.unique(
+                cluster, sorted=True, return_inverse=True, return_counts=True
+            )
+            _, sorted_cluster_indices = torch.sort(cluster)
+            idx_ptr = torch.cat([counts.new_zeros(1), torch.cumsum(counts, dim=0)])
         
-        # voxel_grid 和后续操作不能在 no_grad 中，因为需要跟踪梯度
-        cluster = voxel_grid(
-            pos=coord_fp32 - start[batch], size=self.grid_size, batch=batch, start=0
-        )
-        unique, cluster, counts = torch.unique(
-            cluster, sorted=True, return_inverse=True, return_counts=True
-        )
-        _, sorted_cluster_indices = torch.sort(cluster)
-        idx_ptr = torch.cat([counts.new_zeros(1), torch.cumsum(counts, dim=0)])
-        
-        # 输出坐标用 FP32，feat 保持原始类型
-        coord = segment_csr(coord_fp32[sorted_cluster_indices], idx_ptr, reduce="mean")
+        # 使用 detach 后的索引
+        coord = segment_csr(coord[sorted_cluster_indices], idx_ptr, reduce="mean")
         feat = segment_csr(feat[sorted_cluster_indices], idx_ptr, reduce="max")
         batch = batch[idx_ptr[:-1]]
         offset = batch2offset(batch)
-        return [coord, feat, offset], cluster  # 不 detach，让 PyTorch 管理梯度
+        return [coord, feat, offset], cluster.detach()  # cluster 不需要梯度
     
+
 class UnpoolWithSkip(nn.Module):
     """
     Map Unpooling with skip connection
@@ -355,6 +284,7 @@ class UnpoolWithSkip(nn.Module):
         out_channels,
         bias=True,
         skip=True,
+        norm_layer=PointBatchNorm,
         backend="map",
     ):
         super(UnpoolWithSkip, self).__init__()
@@ -367,12 +297,12 @@ class UnpoolWithSkip(nn.Module):
 
         self.proj = nn.Sequential(
             nn.Linear(in_channels, out_channels, bias=bias),
-            PointLayerNorm(out_channels),
+            norm_layer(out_channels),
             nn.ReLU(inplace=True),
         )
         self.proj_skip = nn.Sequential(
             nn.Linear(skip_channels, out_channels, bias=bias),
-            PointLayerNorm(out_channels),
+            norm_layer(out_channels),
             nn.ReLU(inplace=True),
         )
 
@@ -381,23 +311,14 @@ class UnpoolWithSkip(nn.Module):
         input: points: [pxo], [[n,3],[n,c],[b]], skip_points: [pxo], [[ns,3],[ns,c],[b]], cluster: [ns]
         output: points: [pxo], [[ns,3],[ns,c],[b]]
         """
-        coord, feat, offset = points 
-        skip_coord, skip_feat, skip_offset = skip_points 
-        
+        coord, feat, offset = points # [n, 3] [n, c] [b]
+        skip_coord, skip_feat, skip_offset = skip_points # [ns, 3] [ns, c] [b]
         if self.backend == "map" and cluster is not None:
-            feat = self.proj(feat)[cluster] 
+            feat = self.proj(feat)[cluster] # [n, c] -> [ns, c], 投影上采样
         else:
-            feat_proj = self.proj(feat)
-            # 🔥 [修复 3] 防御性编程：确保 interpolation 接收 int32 offset
-            if offset.dtype != torch.int32:
-                offset = offset.int()
-            if skip_offset.dtype != torch.int32:
-                skip_offset = skip_offset.int()
-                
             feat = pointops.interpolation(
-                coord.float(), skip_coord.float(), feat_proj.float(), offset, skip_offset
-            ) 
-        
-        if self.skip: 
-            feat = feat + self.proj_skip(skip_feat) 
-        return [skip_coord, feat, skip_offset]
+                coord, skip_coord, self.proj(feat), offset, skip_offset
+            ) # [n, c] -> [ns, c], 插值上采样
+        if self.skip: # 跳跃连接，特征融合
+            feat = feat + self.proj_skip(skip_feat) # [ns, c]
+        return [skip_coord, feat, skip_offset] # [ns, 3] [ns, c] [b]

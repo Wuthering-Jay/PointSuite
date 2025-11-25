@@ -839,6 +839,11 @@ class LASProcessorToBinWithGridSample:
         # 这里直接使用 las_data 的数组引用
         lx, ly, lz = las_data.x, las_data.y, las_data.z
         
+        # 获取分类数组（如果存在）
+        l_class = None
+        if has_classification:
+            l_class = las_data.classification
+        
         for i, segment_indices in enumerate(segments):
             segment_info = {
                 'segment_id': i,
@@ -848,6 +853,13 @@ class LASProcessorToBinWithGridSample:
                 'bin_path': str(bin_path),
                 'pkl_path': str(pkl_path),
             }
+            
+            # 统计该片段的类别信息
+            if l_class is not None:
+                seg_class = l_class[segment_indices]
+                unique_labels, counts = np.unique(seg_class, return_counts=True)
+                segment_info['unique_labels'] = unique_labels
+                segment_info['label_counts'] = {int(k): int(v) for k, v in zip(unique_labels, counts)}
             
             # 优化：提取当前 segment 的坐标子集，只做一次切片
             seg_x = lx[segment_indices]
@@ -978,7 +990,7 @@ if __name__ == "__main__":
     max_points = None
     overlap = False
     grid_size = 0.5  # 🔥 设置grid size启用grid sampling
-    max_loops = 8  # 🔥 grid size开启时的最大采样循环次数（避免极端情况）
+    max_loops = 10  # 🔥 grid size开启时的最大采样循环次数（避免极端情况）
     shuffle_points = True  # 🔥 打乱体素内点顺序（提高随机性）
     max_workers = 8  # 自动检测CPU核心数
     ground_class = None  # 🔥 地面点的classification值（None则不生成is_ground字段）

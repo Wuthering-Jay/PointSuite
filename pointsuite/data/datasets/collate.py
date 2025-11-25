@@ -43,7 +43,8 @@ def collate_fn(batch):
         num_points_per_sample = []
         
         # 需要拼接的字段（点级数据）
-        concat_keys = ['coord', 'feat', 'feature', 'indices', 'normal', 'class', 'label', 'classification']
+        concat_keys = ['coord', 'feat', 'feature', 'indices', 'normal', 'class', 'label', 'classification', 
+                       'echo', 'intensity', 'color', 'h_norm']
         
         # 需要保持为列表的字段（样本级数据）
         # 注意：如果有真正的样本级标签（如整个场景的分类），应该使用不同的键名（如 'scene_label'）

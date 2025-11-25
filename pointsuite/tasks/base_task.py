@@ -27,7 +27,8 @@ class BaseTask(pl.LightningModule):
                  loss_configs: List[Dict[str, Any]] = None,
                  metric_configs: List[Dict[str, Any]] = None,
                  class_mapping: Dict[int, int] = None,
-                 class_names: List[str] = None):
+                 class_names: List[str] = None,
+                 ignore_label: int = -1):
         """
         Args:
             learning_rate (float): 学习率。
@@ -322,6 +323,14 @@ class BaseTask(pl.LightningModule):
         loss_dict = self._calculate_total_loss(preds, batch)
         total_loss = loss_dict["total_loss"]
         
+        # 保存最新的 loss 到模块中，供 CustomProgressBar 直接读取
+        # 避免 PL 默认进度条的平滑处理导致数值看起来“卡死”
+        current_loss = total_loss.item()
+        self.last_loss = current_loss
+        # 🔥 强制更新 trainer 上的属性，确保 CustomProgressBar 能读取到最新值
+        if self.trainer is not None:
+            self.trainer.live_loss = current_loss
+        
         # 记录损失
         batch_size = self._get_batch_size(batch)
         for name, loss_value in loss_dict.items():
@@ -334,6 +343,10 @@ class BaseTask(pl.LightningModule):
                 prog_bar=True,
                 batch_size=batch_size,
             )
+            
+        # 调试：每 100 步打印一次 loss，确认是否在变化
+        if batch_idx % 100 == 0:
+            print(f" [Step {self.global_step}] Loss: {total_loss.item():.6f}")
         
         return total_loss
 
@@ -389,96 +402,134 @@ class BaseTask(pl.LightningModule):
     def on_validation_epoch_end(self):
         # 5. 在 epoch 结束时，计算并记录所有指标
         metric_results = {}
+        
+        # 临时存储用于打印的指标
+        print_metrics = {}
+        
         for name, metric in self.val_metrics.items():
-            metric_results[name] = metric.compute()
+            val = metric.compute()
             
-            # 如果是 JaccardIndex (IoU)，输出每个类别的详细指标
-            if name == 'mean_iou':
-                try:
-                    # 获取混淆矩阵
-                    if hasattr(metric, 'confmat'):
-                        confmat = metric.confmat.cpu().numpy() if hasattr(metric.confmat, 'cpu') else metric.confmat
-                    elif hasattr(metric, 'confusion_matrix'):
+            # 处理返回字典的指标 (如 SegmentationMetrics)
+            if isinstance(val, dict):
+                # 记录到 metric_results (用于 log)
+                for k, v in val.items():
+                    # 过滤掉非标量值 (如 class_names 列表)
+                    if isinstance(v, (torch.Tensor, float, int)):
+                        # 确保 tensor 是标量
+                        if isinstance(v, torch.Tensor) and v.numel() > 1:
+                            continue
+                        metric_results[k] = v
+                
+                # 保存完整结果用于打印
+                print_metrics.update(val)
+                
+                # 如果包含混淆矩阵相关的详细信息，尝试提取
+                if 'iou_per_class' in val:
+                    print_metrics['per_class_iou'] = val['iou_per_class']
+                if 'precision_per_class' in val:
+                    print_metrics['per_class_precision'] = val['precision_per_class']
+                if 'recall_per_class' in val:
+                    print_metrics['per_class_recall'] = val['recall_per_class']
+                if 'f1_per_class' in val:
+                    print_metrics['per_class_f1'] = val['f1_per_class']
+                
+            else:
+                metric_results[name] = val
+                print_metrics[name] = val
+            
+            metric.reset() # 重置指标状态
+        
+        # 记录指标 (prog_bar=False 以避免污染进度条)
+        self.log_dict(metric_results, on_step=False, on_epoch=True, prog_bar=False)
+        
+        # --- 打印详细指标 ---
+        # 检查是否有 mIoU 信息 (无论是来自 SegmentationMetrics 还是单独的 MeanIoU)
+        miou_key = 'mean_iou'
+        if miou_key in print_metrics:
+            try:
+                current_miou = float(print_metrics[miou_key])
+                
+                # 更新最佳 mIoU
+                if current_miou > self.best_miou:
+                    self.best_miou = current_miou
+                    self.best_miou_epoch = self.current_epoch
+                
+                # 获取其他指标
+                overall_acc = print_metrics.get('overall_accuracy', None)
+                
+                # 准备每类指标
+                per_class_iou = print_metrics.get('per_class_iou', None)
+                per_class_precision = print_metrics.get('per_class_precision', None)
+                per_class_recall = print_metrics.get('per_class_recall', None)
+                per_class_f1 = print_metrics.get('per_class_f1', None)
+                
+                # 如果没有直接提供每类指标，尝试从旧的 MeanIoU metric 对象中获取 (兼容旧代码)
+                if per_class_iou is None and 'mean_iou' in self.val_metrics:
+                    metric = self.val_metrics['mean_iou']
+                    if hasattr(metric, 'confusion_matrix'):
                         confmat = metric.confusion_matrix.cpu().numpy()
-                    else:
-                        confmat = None
-                    
-                    if confmat is not None:
-                        # 计算每类 IoU、Precision、Recall、F1
                         import numpy as np
                         intersection = np.diag(confmat)
                         union = confmat.sum(1) + confmat.sum(0) - np.diag(confmat)
                         per_class_iou = intersection / (union + 1e-10)
-                        
-                        # Precision = TP / (TP + FP) = diag / col_sum
                         per_class_precision = intersection / (confmat.sum(0) + 1e-10)
-                        # Recall = TP / (TP + FN) = diag / row_sum
                         per_class_recall = intersection / (confmat.sum(1) + 1e-10)
-                        # F1 = 2 * P * R / (P + R)
                         per_class_f1 = 2 * per_class_precision * per_class_recall / (per_class_precision + per_class_recall + 1e-10)
-                        
-                        # 更新最佳 mIoU
-                        current_miou = float(metric_results[name])
-                        if current_miou > self.best_miou:
-                            self.best_miou = current_miou
-                            self.best_miou_epoch = self.current_epoch
-                        
-                        # 获取 Overall Accuracy
-                        overall_acc = metric_results.get('overall_accuracy', None)
-                        
-                        # 输出标题和总体指标
-                        print(f"\n{'='*100}")
-                        print(f"Validation Epoch {self.current_epoch} - Per-Class Metrics")
-                        print(f"{'='*100}")
-                        if overall_acc is not None:
-                            print(f"Overall Accuracy: {overall_acc:.4f} ({overall_acc*100:.2f}%)")
-                        print(f"Mean IoU (current): {current_miou:.4f}")
-                        print(f"Mean IoU (best)   : {self.best_miou:.4f} (Epoch {self.best_miou_epoch})")
-                        if current_miou > self.best_miou - 1e-6:  # 当前是最佳
-                            print(f"🎉 New best mIoU achieved!")
-                        print(f"{'='*100}")
-                        
-                        # 输出每个类别的详细指标
-                        print(f"  {'Class':15s}  {'IoU':>8s}  {'Precision':>10s}  {'Recall':>8s}  {'F1-Score':>10s}")
-                        print(f"  {'-'*15}  {'-'*8}  {'-'*10}  {'-'*8}  {'-'*10}")
-                        
-                        # 从 hparams 获取类别名
+
+                # 输出标题和总体指标
+                print(f"\n{'='*100}")
+                print(f"Validation Epoch {self.current_epoch} - Metrics")
+                print(f"{'='*100}")
+                if overall_acc is not None:
+                    print(f"Overall Accuracy: {overall_acc:.4f} ({overall_acc*100:.2f}%)")
+                print(f"Mean IoU (current): {current_miou:.4f}")
+                print(f"Mean IoU (best)   : {self.best_miou:.4f} (Epoch {self.best_miou_epoch})")
+                if current_miou > self.best_miou - 1e-6:  # 当前是最佳
+                    print(f"🎉 New best mIoU achieved!")
+                print(f"{'='*100}")
+                
+                # 输出每个类别的详细指标
+                if per_class_iou is not None:
+                    print(f"  {'Class':15s}  {'IoU':>8s}  {'Precision':>10s}  {'Recall':>8s}  {'F1-Score':>10s}")
+                    print(f"  {'-'*15}  {'-'*8}  {'-'*10}  {'-'*8}  {'-'*10}")
+                    
+                    # 获取类别名
+                    class_names = print_metrics.get('class_names', None)
+                    if class_names is None:
                         class_names = self.hparams.get('class_names', None) if hasattr(self, 'hparams') else None
-                        if class_names:
-                            for i, class_name in enumerate(class_names):
-                                print(f"  {class_name:15s}  {per_class_iou[i]:8.4f}  {per_class_precision[i]:10.4f}  "
-                                      f"{per_class_recall[i]:8.4f}  {per_class_f1[i]:10.4f}")
-                        else:
-                            for i in range(len(per_class_iou)):
-                                print(f"  Class {i:2d}        {per_class_iou[i]:8.4f}  {per_class_precision[i]:10.4f}  "
-                                      f"{per_class_recall[i]:8.4f}  {per_class_f1[i]:10.4f}")
-                        
-                        # 计算平均指标
-                        mean_precision = np.nanmean(per_class_precision)
-                        mean_recall = np.nanmean(per_class_recall)
-                        mean_f1 = np.nanmean(per_class_f1)
-                        
-                        print(f"  {'-'*15}  {'-'*8}  {'-'*10}  {'-'*8}  {'-'*10}")
-                        print(f"  {'Mean':15s}  {current_miou:8.4f}  {mean_precision:10.4f}  "
-                              f"{mean_recall:8.4f}  {mean_f1:10.4f}")
-                        print(f"{'='*100}\n")
-                except Exception as e:
-                    print(f"Warning: Could not compute per-class IoU: {e}")
-            
-            metric.reset() # 重置指标状态
-        
-        self.log_dict(metric_results, on_step=False, on_epoch=True, prog_bar=True)
+                    
+                    import numpy as np
+                    # 确保是 numpy 数组
+                    if isinstance(per_class_iou, torch.Tensor): per_class_iou = per_class_iou.cpu().numpy()
+                    if isinstance(per_class_precision, torch.Tensor): per_class_precision = per_class_precision.cpu().numpy()
+                    if isinstance(per_class_recall, torch.Tensor): per_class_recall = per_class_recall.cpu().numpy()
+                    if isinstance(per_class_f1, torch.Tensor): per_class_f1 = per_class_f1.cpu().numpy()
+
+                    num_classes = len(per_class_iou)
+                    for i in range(num_classes):
+                        c_name = class_names[i] if class_names and i < len(class_names) else f"Class {i}"
+                        print(f"  {c_name:15s}  {per_class_iou[i]:8.4f}  {per_class_precision[i]:10.4f}  "
+                              f"{per_class_recall[i]:8.4f}  {per_class_f1[i]:10.4f}")
+                    
+                    # 计算平均指标
+                    mean_precision = np.nanmean(per_class_precision)
+                    mean_recall = np.nanmean(per_class_recall)
+                    mean_f1 = np.nanmean(per_class_f1)
+                    
+                    print(f"  {'-'*15}  {'-'*8}  {'-'*10}  {'-'*8}  {'-'*10}")
+                    print(f"  {'Mean':15s}  {current_miou:8.4f}  {mean_precision:10.4f}  "
+                          f"{mean_recall:8.4f}  {mean_f1:10.4f}")
+                print(f"{'='*100}\n")
+            except Exception as e:
+                print(f"Warning: Could not print detailed metrics: {e}")
+                import traceback
+                traceback.print_exc()
 
     # --- 测试 (Test) 逻辑 ---
     
     def test_step(self, batch: Dict[str, Any], batch_idx: int):
         """
         测试步骤：计算损失和指标
-        
-        注意：
-        - 与 validation 类似，但可以通过回调（如 SemanticPredictLasWriter）保存预测结果
-        - 如果需要保存预测结果，应该使用 Trainer.test() 并配置回调
-        - 如果不需要保存结果，只是评估指标，使用 Trainer.validate()
         """
         # 逻辑与 validation_step 相同
         preds = self.forward(batch)
@@ -497,85 +548,96 @@ class BaseTask(pl.LightningModule):
     def on_test_epoch_end(self):
         # 在 epoch 结束时，计算并记录所有指标
         metric_results = {}
+        print_metrics = {}
+        
         for name, metric in self.test_metrics.items():
-            metric_results[name] = metric.compute()
+            val = metric.compute()
             
-            # 如果是 JaccardIndex (IoU)，输出每个类别的详细指标
-            if name == 'mean_iou':
-                try:
-                    # 获取混淆矩阵
-                    if hasattr(metric, 'confmat'):
-                        confmat = metric.confmat.cpu().numpy() if hasattr(metric.confmat, 'cpu') else metric.confmat
-                    elif hasattr(metric, 'confusion_matrix'):
+            if isinstance(val, dict):
+                for k, v in val.items():
+                    if isinstance(v, (torch.Tensor, float, int)):
+                        # 确保 tensor 是标量
+                        if isinstance(v, torch.Tensor) and v.numel() > 1:
+                            continue
+                        metric_results[k] = v
+                
+                print_metrics.update(val)
+                
+                if 'iou_per_class' in val:
+                    print_metrics['per_class_iou'] = val['iou_per_class']
+                if 'precision_per_class' in val:
+                    print_metrics['per_class_precision'] = val['precision_per_class']
+                if 'recall_per_class' in val:
+                    print_metrics['per_class_recall'] = val['recall_per_class']
+                if 'f1_per_class' in val:
+                    print_metrics['per_class_f1'] = val['f1_per_class']
+            else:
+                metric_results[name] = val
+                print_metrics[name] = val
+            
+            metric.reset()
+            
+        self.log_dict(metric_results, on_step=False, on_epoch=True)
+        
+        # --- 打印详细指标 ---
+        miou_key = 'mean_iou'
+        if miou_key in print_metrics:
+            try:
+                current_miou = float(print_metrics[miou_key])
+                overall_acc = print_metrics.get('overall_accuracy', None)
+                
+                per_class_iou = print_metrics.get('per_class_iou', None)
+                per_class_precision = print_metrics.get('per_class_precision', None)
+                per_class_recall = print_metrics.get('per_class_recall', None)
+                per_class_f1 = print_metrics.get('per_class_f1', None)
+                
+                # 兼容旧代码
+                if per_class_iou is None and 'mean_iou' in self.test_metrics:
+                    metric = self.test_metrics['mean_iou']
+                    if hasattr(metric, 'confusion_matrix'):
                         confmat = metric.confusion_matrix.cpu().numpy()
-                    else:
-                        confmat = None
-                    
-                    if confmat is not None:
-                        # 计算每类 IoU、Precision、Recall、F1
                         import numpy as np
                         intersection = np.diag(confmat)
                         union = confmat.sum(1) + confmat.sum(0) - np.diag(confmat)
                         per_class_iou = intersection / (union + 1e-10)
-                        
-                        # Precision = TP / (TP + FP) = diag / col_sum
                         per_class_precision = intersection / (confmat.sum(0) + 1e-10)
-                        # Recall = TP / (TP + FN) = diag / row_sum
                         per_class_recall = intersection / (confmat.sum(1) + 1e-10)
-                        # F1 = 2 * P * R / (P + R)
                         per_class_f1 = 2 * per_class_precision * per_class_recall / (per_class_precision + per_class_recall + 1e-10)
-                        
-                        # 获取 Overall Accuracy
-                        overall_acc = metric_results.get('overall_accuracy', None)
-                        current_miou = float(metric_results[name])
-                        
-                        # 输出标题和总体指标
-                        print(f"\n{'='*100}")
-                        print(f"Test Results - Per-Class Metrics")
-                        print(f"{'='*100}")
-                        if overall_acc is not None:
-                            print(f"Overall Accuracy: {overall_acc:.4f} ({overall_acc*100:.2f}%)")
-                        print(f"Mean IoU: {current_miou:.4f}")
-                        print(f"{'='*100}")
-                        
-                        # 输出每个类别的详细指标
-                        print(f"  {'Class':15s}  {'IoU':>8s}  {'Precision':>10s}  {'Recall':>8s}  {'F1-Score':>10s}")
-                        print(f"  {'-'*15}  {'-'*8}  {'-'*10}  {'-'*8}  {'-'*10}")
-                        
-                        # 从 hparams 获取类别名
+
+                print(f"\n{'='*100}")
+                print(f"Test Results - Metrics")
+                print(f"{'='*100}")
+                if overall_acc is not None:
+                    print(f"Overall Accuracy: {overall_acc:.4f} ({overall_acc*100:.2f}%)")
+                print(f"Mean IoU: {current_miou:.4f}")
+                print(f"{'='*100}")
+                
+                if per_class_iou is not None:
+                    print(f"  {'Class':15s}  {'IoU':>8s}  {'Precision':>10s}  {'Recall':>8s}  {'F1-Score':>10s}")
+                    print(f"  {'-'*15}  {'-'*8}  {'-'*10}  {'-'*8}  {'-'*10}")
+                    
+                    class_names = print_metrics.get('class_names', None)
+                    if class_names is None:
                         class_names = self.hparams.get('class_names', None) if hasattr(self, 'hparams') else None
-                        if class_names:
-                            for i, class_name in enumerate(class_names):
-                                print(f"  {class_name:15s}  {per_class_iou[i]:8.4f}  {per_class_precision[i]:10.4f}  "
-                                      f"{per_class_recall[i]:8.4f}  {per_class_f1[i]:10.4f}")
-                        else:
-                            for i in range(len(per_class_iou)):
-                                print(f"  Class {i:2d}        {per_class_iou[i]:8.4f}  {per_class_precision[i]:10.4f}  "
-                                      f"{per_class_recall[i]:8.4f}  {per_class_f1[i]:10.4f}")
-                        
-                        # 计算平均指标
-                        mean_precision = np.nanmean(per_class_precision)
-                        mean_recall = np.nanmean(per_class_recall)
-                        mean_f1 = np.nanmean(per_class_f1)
-                        
-                        print(f"  {'-'*15}  {'-'*8}  {'-'*10}  {'-'*8}  {'-'*10}")
-                        print(f"  {'Mean':15s}  {current_miou:8.4f}  {mean_precision:10.4f}  {mean_recall:8.4f}  {mean_f1:10.4f}")
-                        print(f"{'='*100}")
-                        
-                        # 🔥 新增：打印预测类别分布（用于对比 predict 阶段）
-                        print(f"\nTest 阶段预测类别分布（连续标签 0-{len(per_class_iou)-1}）:")
-                        pred_distribution = confmat.sum(axis=0)  # 每个类别被预测的次数
-                        total_points = pred_distribution.sum()
-                        for i in range(len(pred_distribution)):
-                            count = int(pred_distribution[i])
-                            percentage = count / total_points * 100 if total_points > 0 else 0
-                            if class_names:
-                                print(f"  类别 {i} ({class_names[i]:10s}): {count:8d} 点 ({percentage:5.2f}%)")
-                            else:
-                                print(f"  类别 {i}: {count:8d} 点 ({percentage:5.2f}%)")
-                        print(f"{'='*100}\n")
-                except Exception as e:
-                    print(f"警告: 无法打印详细指标: {e}")
-            
-            metric.reset()
-        self.log_dict(metric_results, on_step=False, on_epoch=True)
+                    
+                    import numpy as np
+                    if isinstance(per_class_iou, torch.Tensor): per_class_iou = per_class_iou.cpu().numpy()
+                    if isinstance(per_class_precision, torch.Tensor): per_class_precision = per_class_precision.cpu().numpy()
+                    if isinstance(per_class_recall, torch.Tensor): per_class_recall = per_class_recall.cpu().numpy()
+                    if isinstance(per_class_f1, torch.Tensor): per_class_f1 = per_class_f1.cpu().numpy()
+
+                    num_classes = len(per_class_iou)
+                    for i in range(num_classes):
+                        c_name = class_names[i] if class_names and i < len(class_names) else f"Class {i}"
+                        print(f"  {c_name:15s}  {per_class_iou[i]:8.4f}  {per_class_precision[i]:10.4f}  "
+                              f"{per_class_recall[i]:8.4f}  {per_class_f1[i]:10.4f}")
+                    
+                    mean_precision = np.nanmean(per_class_precision)
+                    mean_recall = np.nanmean(per_class_recall)
+                    mean_f1 = np.nanmean(per_class_f1)
+                    
+                    print(f"  {'-'*15}  {'-'*8}  {'-'*10}  {'-'*8}  {'-'*10}")
+                    print(f"  {'Mean':15s}  {current_miou:8.4f}  {mean_precision:10.4f}  {mean_recall:8.4f}  {mean_f1:10.4f}")
+                print(f"{'='*100}\n")
+            except Exception as e:
+                print(f"警告: 无法打印详细指标: {e}")

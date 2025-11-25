@@ -24,6 +24,7 @@ class Block(nn.Module):
         pe_bias=True,
         attn_drop_rate=0.0,
         drop_path_rate=0.0,
+        norm_layer=PointBatchNorm,
     ):
         super(Block, self).__init__()
         self.attn = GroupedVectorAttention(
@@ -33,13 +34,13 @@ class Block(nn.Module):
             attn_drop_rate=attn_drop_rate,
             pe_multiplier=pe_multiplier,
             pe_bias=pe_bias,
-            norm_layer=PointLayerNorm,
+            norm_layer=norm_layer,
         )
         self.fc1 = nn.Linear(embed_channels, embed_channels, bias=False)
         self.fc3 = nn.Linear(embed_channels, embed_channels, bias=False)
-        self.norm1 = PointLayerNorm(embed_channels)
-        self.norm2 = PointLayerNorm(embed_channels)
-        self.norm3 = PointLayerNorm(embed_channels)
+        self.norm1 = norm_layer(embed_channels)
+        self.norm2 = norm_layer(embed_channels)
+        self.norm3 = norm_layer(embed_channels)
         self.act = nn.ReLU(inplace=True)
         self.drop_path = (DropPath(drop_path_rate) if drop_path_rate > 0.0 else nn.Identity())
 
@@ -70,6 +71,7 @@ class BlockSequence(nn.Module):
         pe_bias=True,
         attn_drop_rate=0.0,
         drop_path_rate=0.0,
+        norm_layer=PointBatchNorm,
     ):
         super(BlockSequence, self).__init__()
 
@@ -94,26 +96,14 @@ class BlockSequence(nn.Module):
                 pe_bias=pe_bias,
                 attn_drop_rate=attn_drop_rate,
                 drop_path_rate=drop_path_rates[i],
+                norm_layer=norm_layer,
             )
             self.blocks.append(block)
 
     def forward(self, points):
         coord, feat, offset = points 
-        
-        # [新增] 防御性编程：确保 offset 是 int32
-        if offset.dtype != torch.int32:
-            offset = offset.int()
-            
-        # 2. 确保 coord 是 FP32 且连续
-        # 混合精度下 coord 可能会变成 FP16，这在几何计算中是危险的
-        coord_fp32 = coord.float().contiguous()
-        
-        # 3. 确保 feat 连续 (类型可以是 FP16)
-        if not feat.is_contiguous():
-            feat = feat.contiguous()
-
         with torch.no_grad():
-            reference_index, _ = pointops.knn_query(self.neighbours, coord_fp32, offset)
+            reference_index, _ = pointops.knn_query(self.neighbours, coord, offset)
         
         for block in self.blocks:
             points = block(points, reference_index)
@@ -148,6 +138,7 @@ class Encoder(nn.Module):
         pe_bias=True,
         attn_drop_rate=None,
         drop_path_rate=None,
+        norm_layer=PointBatchNorm,
     ):
         super(Encoder, self).__init__()
 
@@ -155,6 +146,7 @@ class Encoder(nn.Module):
             in_channels=in_channels,
             out_channels=embed_channels,
             grid_size=grid_size,
+            norm_layer=norm_layer,
         )
 
         self.blocks = BlockSequence(
@@ -167,6 +159,7 @@ class Encoder(nn.Module):
             pe_bias=pe_bias,
             attn_drop_rate=attn_drop_rate if attn_drop_rate is not None else 0.0,
             drop_path_rate=drop_path_rate if drop_path_rate is not None else 0.0,
+            norm_layer=norm_layer,
         )
 
     def forward(self, points):
@@ -209,6 +202,7 @@ class Decoder(nn.Module):
         attn_drop_rate=None,
         drop_path_rate=None,
         unpool_backend="map",
+        norm_layer=PointBatchNorm,
     ):
         super(Decoder, self).__init__()
 
@@ -217,6 +211,7 @@ class Decoder(nn.Module):
             out_channels=embed_channels,
             skip_channels=skip_channels,
             backend=unpool_backend,
+            norm_layer=norm_layer,
         )
 
         self.blocks = BlockSequence(
@@ -229,6 +224,7 @@ class Decoder(nn.Module):
             pe_bias=pe_bias,
             attn_drop_rate=attn_drop_rate if attn_drop_rate is not None else 0.0,
             drop_path_rate=drop_path_rate if drop_path_rate is not None else 0.0,
+            norm_layer=norm_layer,
         )
 
     def forward(self, points, skip_points, cluster):
@@ -267,6 +263,7 @@ class GVAPatchEmbed(nn.Module):
         pe_bias=True,
         attn_drop_rate=0.0,
         drop_path_rate=0.0,
+        norm_layer=PointBatchNorm,
     ):
         super(GVAPatchEmbed, self).__init__()
         self.in_channels = in_channels
@@ -274,10 +271,10 @@ class GVAPatchEmbed(nn.Module):
         self.embed_channels = embed_channels
         self.proj = nn.Sequential(
             nn.Linear(in_channels, self.mid_channels, bias=False),
-            PointLayerNorm(self.mid_channels),
+            norm_layer(self.mid_channels),
             nn.ReLU(inplace=True),
         )
-        self.pointnet = PointNetLayer(in_channels, embed_channels-self.mid_channels, norm_layer=PointLayerNorm, k_neighbors=neighbours)
+        self.pointnet = PointNetLayer(in_channels, embed_channels-self.mid_channels, norm_layer=norm_layer, k_neighbors=neighbours)
         
         self.blocks = BlockSequence(
             depth=depth,
@@ -289,6 +286,7 @@ class GVAPatchEmbed(nn.Module):
             pe_bias=pe_bias,
             attn_drop_rate=attn_drop_rate,
             drop_path_rate=drop_path_rate,
+            norm_layer=norm_layer,
         )
 
     def forward(self, points):
@@ -350,6 +348,7 @@ class PointTransformerV2(nn.Module):
         attn_drop_rate=0.0,
         drop_path_rate=0,
         unpool_backend="map",
+        norm_layer=PointBatchNorm,
     ):
         super(PointTransformerV2, self).__init__()
         self.in_channels = in_channels
@@ -373,6 +372,7 @@ class PointTransformerV2(nn.Module):
             pe_multiplier=pe_multiplier,
             pe_bias=pe_bias,
             attn_drop_rate=attn_drop_rate,
+            norm_layer=norm_layer,
         )
         # bottleneck的drop率逐渐提高
         enc_dp_rates = [
@@ -402,6 +402,7 @@ class PointTransformerV2(nn.Module):
                 drop_path_rate=enc_dp_rates[
                     sum(enc_depths[:i]) : sum(enc_depths[: i + 1])
                 ],
+                norm_layer=norm_layer,
             )
             dec = Decoder(
                 depth=dec_depths[i],
@@ -418,6 +419,7 @@ class PointTransformerV2(nn.Module):
                     sum(dec_depths[:i]) : sum(dec_depths[: i + 1])
                 ],
                 unpool_backend=unpool_backend,
+                norm_layer=norm_layer,
             )
             self.enc_stages.append(enc)
             self.dec_stages.append(dec)

@@ -46,6 +46,33 @@ class CustomProgressBar(TQDMProgressBar):
         
         # 简化指标名称
         simplified = {}
+        
+        # 优先处理 loss (优先显示实时 loss)
+        # 使用 try-except 块防止任何属性访问错误导致训练崩溃
+        try:
+            # 1. 尝试从 trainer.live_loss 获取 (最可靠，由 training_step 直接写入)
+            if hasattr(trainer, 'live_loss'):
+                simplified["loss"] = trainer.live_loss
+            # 2. 尝试从 pl_module.last_loss 获取
+            elif hasattr(pl_module, 'last_loss'):
+                simplified["loss"] = pl_module.last_loss
+            # 3. 尝试从 trainer.lightning_module 获取 (以防 pl_module 是副本)
+            elif hasattr(trainer, 'lightning_module') and hasattr(trainer.lightning_module, 'last_loss'):
+                simplified["loss"] = trainer.lightning_module.last_loss
+        except Exception:
+            pass
+            
+        # 如果上述方法都失败，回退到 items 中的值
+        if "loss" not in simplified:
+            if "total_loss_step" in items:
+                simplified["loss"] = items.pop("total_loss_step")
+        elif "train_loss_step" in items:
+            simplified["loss"] = items.pop("train_loss_step")
+        elif "loss" in items:
+            simplified["loss"] = items.pop("loss")
+        elif "train_loss" in items:
+            simplified["loss"] = items.pop("train_loss")
+            
         for k, v in items.items():
             # 移除前缀和后缀
             k_clean = k.replace("train_", "").replace("val_", "").replace("_step", "").replace("_epoch", "")
@@ -62,6 +89,12 @@ class CustomProgressBar(TQDMProgressBar):
             }
             
             k_short = name_map.get(k_clean, k_clean)
+            
+            # 过滤掉不需要在进度条显示的指标 (如验证集的详细指标)
+            # 只要不在 name_map 中的，或者显式排除的
+            if k_short in ['mIoU', 'OA', 'precision', 'recall', 'f1']:
+                continue
+                
             simplified[k_short] = v
         
         # 添加 batch 信息（如果可用）

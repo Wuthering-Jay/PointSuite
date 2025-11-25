@@ -663,13 +663,30 @@ class BinPklDataset(DatasetBase):
                         segment_info = seg
                         break
                 
-                if segment_info is None or 'unique_labels' not in segment_info:
-                    # 如果没有类别信息，使用默认权重 1.0
+                unique_labels = None
+                if segment_info is not None and 'unique_labels' in segment_info:
+                    unique_labels = segment_info['unique_labels']
+                else:
+                    # 如果没有类别信息，尝试从 bin 文件加载
+                    # 这会增加初始化时间，但能保证权重正确
+                    try:
+                        bin_path = Path(segment_info['bin_path'])
+                        if bin_path.exists():
+                            # 只读取 classification 字段
+                            point_data = np.memmap(bin_path, dtype=metadata['dtype'], mode='r')
+                            indices = segment_info['indices']
+                            segment_points = point_data[indices]
+                            unique_labels = np.unique(segment_points['classification'])
+                    except Exception as e:
+                        # print(f"无法加载 segment {segment_id} 的类别信息: {e}")
+                        pass
+
+                if unique_labels is None:
+                    # 如果仍然无法获取，使用默认权重 1.0
                     weights_dict[idx] = 1.0
                     continue
                 
                 # 计算权重：包含的所有类别的类别权重之和
-                unique_labels = segment_info['unique_labels']
                 segment_weight = 0.0
                 
                 for label in unique_labels:

@@ -215,7 +215,7 @@ class DatasetBase(Dataset, ABC):
                    - 'log_inverse': 1 / log(count + 1)（对数反比例）
                    - 'effective_num': Effective Number of Samples (ENS) 方法
             smooth: 平滑参数，避免权重过大（加到分母上）
-            normalize: 是否归一化权重使其和为 num_classes
+            normalize: 是否归一化权重使其和为 1
         
         返回：
             类别权重字典 {class_id: weight}，如果不支持则返回 None
@@ -251,7 +251,7 @@ class DatasetBase(Dataset, ABC):
         
         # 归一化
         if normalize:
-            weights = weights * num_classes / weights.sum()
+            weights = weights / weights.sum()
         
         # 转换为字典
         return {i: float(weights[i]) for i in range(num_classes) if counts[i] > 0}
