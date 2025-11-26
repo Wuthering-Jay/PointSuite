@@ -985,11 +985,11 @@ if __name__ == "__main__":
     # 示例：处理LAS文件（带Grid Sampling）
     input_path = r"E:\data\DALES\dales_las\test"
     output_dir = r"E:\data\DALES\dales_las\bin\test"
-    window_size = (25.0, 25.0)
-    min_points = 4096 * 2.5
+    window_size = (50.0, 50.0)
+    min_points = 4096 * 5
     max_points = None
     overlap = False
-    grid_size = 0.25  # 🔥 设置grid size启用grid sampling
+    grid_size = 0.5  # 🔥 设置grid size启用grid sampling
     max_loops = 10  # 🔥 grid size开启时的最大采样循环次数（避免极端情况）
     shuffle_points = True  # 🔥 打乱体素内点顺序（提高随机性）
     max_workers = 8  # 自动检测CPU核心数

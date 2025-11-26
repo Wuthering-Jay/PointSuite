@@ -8,6 +8,7 @@ from .cross_entropy import CrossEntropyLoss
 from .focal_loss import FocalLoss
 from .lovasz_loss import LovaszLoss
 from .dice_loss import DiceLoss, DiceCELoss
+from .lac_loss import LACLoss
 
 __all__ = [
     'CrossEntropyLoss',
@@ -15,4 +16,5 @@ __all__ = [
     'LovaszLoss',
     'DiceLoss',
     'DiceCELoss',
+    'LACLoss',
 ]

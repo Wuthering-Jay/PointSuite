@@ -223,9 +223,9 @@ def main():
             "weight": 1.0,
         },
         {
-            "name": "lovasz_loss",
-            "class_path": "pointsuite.models.losses.LovaszLoss",
-            "init_args": {"mode": "multiclass", "ignore_index": IGNORE_LABEL},
+            "name": "lac_loss",
+            "class_path": "pointsuite.models.losses.LACLoss",
+            "init_args": {"k_neighbors":16, "ignore_index": IGNORE_LABEL},
             "weight": 1.0,
         },
     ]

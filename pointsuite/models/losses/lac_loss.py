@@ -48,8 +48,7 @@ class LACLoss(nn.Module):
         seg_logits = pred
         coord = data_dict["coord"]
         offset = data_dict["offset"].int()
-        # 根据您的代码，标签键名为 "segment"
-        labels = data_dict["segment"] 
+        labels = data_dict["class"] 
         
         # 2. 计算预测概率
         # 这个计算需要保留梯度，因此在 no_grad() 之外
