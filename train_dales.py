@@ -166,7 +166,8 @@ def main():
         predict_transforms=predict_transforms,
     )
     
-    datamodule.print_info()
+    # 🔥 手动 setup 以便访问数据集并计算权重
+    datamodule.setup(stage='fit')
     
     # ========================================================================
     # 模型
@@ -209,13 +210,16 @@ def main():
             }
         }
     }
+
     
-    # 损失函数（不使用类别权重，让加权采样处理类别不平衡）
     loss_configs = [
         {
             "name": "ce_loss",
             "class_path": "pointsuite.models.losses.CrossEntropyLoss",
-            "init_args": {"ignore_index": IGNORE_LABEL},
+            "init_args": {
+                "ignore_index": IGNORE_LABEL,
+                "weight": datamodule.train_dataset.class_weights, # 直接调用属性
+            },
             "weight": 1.0,
         },
         {
@@ -306,7 +310,7 @@ def main():
         max_epochs=MAX_EPOCHS,
         devices=1,
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
-        precision="bf16-mixed",
+        precision="16-mixed",
         log_every_n_steps=10,
         default_root_dir='./outputs/dales',
         logger=False, # 🔥 禁用默认 Logger

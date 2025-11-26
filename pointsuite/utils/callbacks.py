@@ -816,8 +816,17 @@ class TextLoggingCallback(Callback):
                 for k, v in trainer.callback_metrics.items():
                     if k.endswith("_step") and k != "total_loss_step" and "val" not in k and "test" not in k:
                         name = k.replace("_step", "").replace("train_", "")
+                        
+                        # Map common loss names to shorter versions
                         if name == "ce_loss": name = "CE"
                         elif name == "lovasz_loss": name = "LOV"
+                        # elif "dice" in name: name = "DICE"
+                        # elif "focal" in name: name = "FOCAL"
+                        # elif "lac" in name: name = "LAC"
+                        elif name == "lac_loss": name = "LAC"
+                        elif name == "focal_loss": name = "FOCAL"
+                        elif name == "dice_loss": name = "DICE"
+                        
                         val = v.item() if hasattr(v, 'item') else v
                         metrics_str_parts.append(f"{name}={val:.4f}")
             

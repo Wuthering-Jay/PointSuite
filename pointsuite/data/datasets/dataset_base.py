@@ -77,6 +77,10 @@ class DatasetBase(Dataset, ABC):
         # 如果启用则缓存数据
         self.data_cache = {} if cache_data else None
         
+        # 缓存类别权重
+        self._class_weights = None
+        self._class_weights_dict = None
+        
         # 验证数据根目录（对于列表类型跳过验证，由子类处理）
         if not isinstance(self.data_root, (list, tuple)) and not self.data_root.exists():
             raise ValueError(f"数据根目录不存在: {self.data_root}")
@@ -255,6 +259,36 @@ class DatasetBase(Dataset, ABC):
         
         # 转换为字典
         return {i: float(weights[i]) for i in range(num_classes) if counts[i] > 0}
+
+    @property
+    def class_weights(self):
+        """
+        获取类别权重 Tensor (用于 Loss)
+        默认使用 log_inverse 方法计算
+        """
+        if self._class_weights is None:
+            weights_dict = self.compute_class_weights(method='log_inverse')
+            if weights_dict is None:
+                return None
+            
+            import torch
+            # 假设最大类别ID
+            num_classes = max(weights_dict.keys()) + 1
+            weights = torch.ones(num_classes, dtype=torch.float32)
+            for cls_idx, w in weights_dict.items():
+                weights[cls_idx] = w
+            self._class_weights = weights
+            
+        return self._class_weights
+
+    @property
+    def class_weights_dict(self):
+        """
+        获取类别权重字典
+        """
+        if self._class_weights_dict is None:
+             self._class_weights_dict = self.compute_class_weights(method='log_inverse')
+        return self._class_weights_dict
 
 
 
