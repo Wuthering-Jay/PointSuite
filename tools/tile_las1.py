@@ -700,7 +700,7 @@ if __name__ == "__main__":
         output_dir=r"E:\data\DALES\dales_las\bin\train_logical",
         window_size=(50.0, 50.0),
         overlap=False, 
-        grid_size=None,     # 统一 Grid Size
+        grid_size=0.5,     # 统一 Grid Size
         min_points=5000,
         max_points=None,
         ground_class=None
