@@ -403,12 +403,26 @@ class BinPklDataset(DatasetBase):
             elif asset == 'intensity':
                 # 提取原始强度值（保持原始位数，不归一化）
                 # 归一化应在 transforms 中完成，如 AutoNormalizeIntensity
+                if 'intensity' not in segment_points.dtype.names:
+                    raise ValueError(
+                        f"请求的属性 'intensity' 在数据中不存在。\n"
+                        f"可用字段: {list(segment_points.dtype.names)}\n"
+                        f"请检查 assets 配置或数据文件。"
+                    )
                 intensity = segment_points['intensity'].astype(np.float32)
                 data['intensity'] = intensity  # [N,]
                 
-            elif asset == 'color' and all(c in segment_points.dtype.names for c in ['red', 'green', 'blue']):
+            elif asset == 'color':
                 # 提取原始 RGB 颜色值（保持原始位数，不归一化）
                 # 归一化应在 transforms 中完成，如 AutoNormalizeColor
+                required_fields = ['red', 'green', 'blue']
+                missing = [f for f in required_fields if f not in segment_points.dtype.names]
+                if missing:
+                    raise ValueError(
+                        f"请求的属性 'color' 所需字段 {missing} 在数据中不存在。\n"
+                        f"可用字段: {list(segment_points.dtype.names)}\n"
+                        f"请检查 assets 配置或数据文件。"
+                    )
                 color = np.stack([
                     segment_points['red'],
                     segment_points['green'],
@@ -416,8 +430,16 @@ class BinPklDataset(DatasetBase):
                 ], axis=1).astype(np.float32)
                 data['color'] = color  # [N, 3]
 
-            elif asset == 'echo' and all(c in segment_points.dtype.names for c in ['return_number', 'number_of_returns']):
+            elif asset == 'echo':
                 # 提取回波信息
+                required_fields = ['return_number', 'number_of_returns']
+                missing = [f for f in required_fields if f not in segment_points.dtype.names]
+                if missing:
+                    raise ValueError(
+                        f"请求的属性 'echo' 所需字段 {missing} 在数据中不存在。\n"
+                        f"可用字段: {list(segment_points.dtype.names)}\n"
+                        f"请检查 assets 配置或数据文件。"
+                    )
                 is_first = (segment_points['return_number'] == 1).astype(np.float32)
                 is_last = (segment_points['return_number'] == segment_points['number_of_returns']).astype(np.float32)
                 # 转换为 [-1, 1] 范围：True -> 1, False -> -1
@@ -426,8 +448,16 @@ class BinPklDataset(DatasetBase):
                 echo = np.stack([is_first, is_last], axis=1)  # [N, 2]
                 data['echo'] = echo  # [N, 2]
 
-            elif asset == 'normal' and all(c in segment_points.dtype.names for c in ['normal_x', 'normal_y', 'normal_z']):
+            elif asset == 'normal':
                 # 提取法向量
+                required_fields = ['normal_x', 'normal_y', 'normal_z']
+                missing = [f for f in required_fields if f not in segment_points.dtype.names]
+                if missing:
+                    raise ValueError(
+                        f"请求的属性 'normal' 所需字段 {missing} 在数据中不存在。\n"
+                        f"可用字段: {list(segment_points.dtype.names)}\n"
+                        f"请检查 assets 配置或数据文件。"
+                    )
                 normal = np.stack([
                     segment_points['normal_x'],
                     segment_points['normal_y'],
@@ -449,6 +479,12 @@ class BinPklDataset(DatasetBase):
 
             elif asset == 'class':
                 # 单独存储分类标签为目标
+                if 'classification' not in segment_points.dtype.names:
+                    raise ValueError(
+                        f"请求的属性 'class' 所需字段 'classification' 在数据中不存在。\n"
+                        f"可用字段: {list(segment_points.dtype.names)}\n"
+                        f"请检查 assets 配置或数据文件。"
+                    )
                 classification = segment_points['classification'].astype(np.int64)
                 
                 # 如果提供了类别映射则应用
