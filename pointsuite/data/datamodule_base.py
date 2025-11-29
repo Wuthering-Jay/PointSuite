@@ -265,7 +265,7 @@ class DataModuleBase(pl.LightningDataModule, ABC):
             # 从数据集自动计算类别权重
             print("自动从数据集计算类别权重...")
             class_weights_dict = dataset.compute_class_weights(
-                method='log_inverse',
+                method='sqrt_inverse',  # sqrt_inverse 比 log_inverse 差异更大
                 smooth=1.0,
                 normalize=True
             )
@@ -398,7 +398,11 @@ class DataModuleBase(pl.LightningDataModule, ABC):
     
     def val_dataloader(self) -> DataLoader:
         """创建并返回验证 DataLoader（必须访问所有样本）"""
-        return self._create_dataloader(
+        print(f"[DEBUG] val_dataloader() called, val_dataset={self.val_dataset is not None}, len={len(self.val_dataset) if self.val_dataset else 0}")
+        if self.val_dataset is None:
+            print("[DEBUG] WARNING: val_dataset is None!")
+            return None
+        loader = self._create_dataloader(
             dataset=self.val_dataset,
             shuffle=False,
             drop_last=False,
@@ -406,6 +410,8 @@ class DataModuleBase(pl.LightningDataModule, ABC):
             use_dynamic_batch=self.use_dynamic_batch_inference,
             max_points=self.max_points_inference
         )
+        print(f"[DEBUG] val_dataloader created with {len(loader)} batches")
+        return loader
     
     def test_dataloader(self) -> DataLoader:
         """创建并返回测试 DataLoader（必须访问所有样本）"""

@@ -736,7 +736,10 @@ class TextLoggingCallback(Callback):
         self._log_batch(trainer, pl_module, batch, batch_idx, stage="Pred")
 
     def _log_batch(self, trainer, pl_module, batch, batch_idx, stage):
-        if (batch_idx + 1) % self.log_interval != 0:
+        # 🔥 始终输出第一个 batch（便于调试）
+        if batch_idx == 0 and stage != "Train":
+            pass  # 继续执行，不 return
+        elif (batch_idx + 1) % self.log_interval != 0:
             return
 
         # 1. Basic Info
@@ -846,3 +849,511 @@ class TextLoggingCallback(Callback):
         print(f"[{stage}] {epoch_str} [{current_batch}/{total_batches}] "
               f"{elapsed_str}<{remaining_str}, {avg_time:.2f}s/it"
               f"{lr_str}{metrics_str}, bs={batch_size}, pts={pts_str}")
+
+
+# ============================================================================
+# SemanticPredictLasWriter1: 适配 tile_las1.py 逻辑索引格式
+# ============================================================================
+
+class SemanticPredictLasWriter1(BasePredictionWriter):
+    """
+    用于语义分割的 PredictionWriter 回调 (适配 tile_las1.py 逻辑索引格式)
+    
+    与原版 SemanticPredictLasWriter 的区别：
+    1. 支持 coord_offset 恢复全局坐标
+    2. 支持 segment_id 和 loop_idx 区分不同采样轮次
+    3. 适配新的 pkl 元数据结构
+    
+    主要功能:
+    1. 流式写入: 防止大规模点云预测时的 OOM
+    2. 投票机制: 对重叠预测进行 logits 平均投票
+    3. 完整性恢复: 从原始 bin/pkl 恢复坐标和属性
+    4. 格式保持: 保留原始 LAS 头信息和坐标系
+    """
+    
+    def __init__(self, 
+                 output_dir: str, 
+                 write_interval: str = "batch", 
+                 num_classes: int = -1,
+                 save_logits: bool = False,
+                 reverse_class_mapping: Optional[Dict[int, int]] = None,
+                 auto_infer_reverse_mapping: bool = True):
+        super().__init__(write_interval)
+        self.output_dir = output_dir
+        self.temp_dir = os.path.join(self.output_dir, "temp_predictions")
+        self.num_classes = num_classes
+        self.save_logits = save_logits
+        self.reverse_class_mapping = reverse_class_mapping
+        self.auto_infer_reverse_mapping = auto_infer_reverse_mapping
+        self._mapping_inferred = False
+        
+        os.makedirs(self.output_dir, exist_ok=True)
+        os.makedirs(self.temp_dir, exist_ok=True)
+        
+        # 统计信息
+        self._stats = {
+            'total_batches': 0,
+            'total_points': 0,
+            'files_processed': set()
+        }
+    
+    def on_predict_start(self, trainer: 'pl.Trainer', pl_module: 'pl.LightningModule'):
+        """预测开始前的初始化工作"""
+        self._infer_class_mapping(trainer, pl_module)
+        
+        # 美化输出
+        print()
+        print("╔" + "═" * 68 + "╗")
+        print("║" + " 🚀 语义分割预测 (逻辑索引格式)".center(58) + "║")
+        print("╠" + "═" * 68 + "╣")
+        print(f"║  📁 输出目录: {self.output_dir[:50]:<50} ║")
+        print(f"║  🏷️  类别数量: {self.num_classes if self.num_classes > 0 else '自动推断':<50} ║")
+        print(f"║  💾 保存 Logits: {'是' if self.save_logits else '否':<50} ║")
+        print("╚" + "═" * 68 + "╝")
+        print()
+
+    def write_on_batch_end(
+        self, 
+        trainer: 'pl.Trainer', 
+        pl_module: 'pl.LightningModule', 
+        prediction: Dict[str, torch.Tensor], 
+        batch_indices: List[int], 
+        batch: Any, 
+        batch_idx: int, 
+        dataloader_idx: int
+    ):
+        """每个批次结束时，将预测结果写入临时文件"""
+        if not self._validate_prediction(prediction, batch_idx):
+            return
+        
+        # 1. 准备数据
+        bin_files = prediction['bin_file']
+        logits = prediction['logits'].cpu().float()
+        indices = prediction['indices'].cpu()
+        
+        bin_paths = prediction.get('bin_path', [None] * len(bin_files))
+        pkl_paths = prediction.get('pkl_path', [None] * len(bin_files))
+        
+        # 获取 offset
+        offsets = batch['offset'].cpu().numpy() if 'offset' in batch else [len(logits)]
+        
+        # 2. 按文件分组并保存
+        self._save_batch_predictions(
+            bin_files, logits, indices, bin_paths, pkl_paths, 
+            offsets, batch_idx, pl_module
+        )
+        
+        # 更新统计
+        self._stats['total_batches'] += 1
+        self._stats['total_points'] += len(logits)
+        for bf in bin_files:
+            self._stats['files_processed'].add(bf if isinstance(bf, str) else str(bf))
+
+    def on_predict_end(self, trainer: 'pl.Trainer', pl_module: 'pl.LightningModule'):
+        """预测结束后的汇总处理"""
+        self._ensure_num_classes(pl_module)
+        
+        print()
+        print("╔" + "═" * 68 + "╗")
+        print("║" + " 📊 预测完成，开始拼接和投票...".center(53) + "║")
+        print("╚" + "═" * 68 + "╝")
+        print()
+        
+        tmp_files = sorted(glob.glob(os.path.join(self.temp_dir, "*.pred.tmp")))
+        if not tmp_files:
+            print("  ⚠️  警告: 未找到临时预测文件")
+            return
+            
+        # 按 bin 文件分组
+        bin_file_groups = self._group_temp_files(tmp_files)
+        print(f"  📁 检测到 {len(bin_file_groups)} 个唯一 bin 文件")
+        
+        try:
+            for idx, (bin_basename, file_list) in enumerate(bin_file_groups.items(), 1):
+                print()
+                print(f"  ┌─ [{idx}/{len(bin_file_groups)}] 处理: {bin_basename}")
+                print(f"  │  批次数: {len(file_list)}")
+                try:
+                    self._process_single_bin_file(bin_basename, file_list, trainer, pl_module)
+                    print(f"  └─ ✅ 完成")
+                except Exception as e:
+                    print(f"  └─ ❌ 错误: {e}")
+                    import traceback
+                    traceback.print_exc()
+        finally:
+            self._cleanup_temp_files(tmp_files, pl_module)
+        
+        # 最终统计
+        print()
+        print("╔" + "═" * 68 + "╗")
+        print("║" + " 🎉 预测完成!".center(58) + "║")
+        print("╠" + "═" * 68 + "╣")
+        print(f"║  📊 总批次数: {self._stats['total_batches']:<51} ║")
+        print(f"║  📊 总点数: {self._stats['total_points']:,}".ljust(55) + "║")
+        print(f"║  📁 输出文件: {len(bin_file_groups)} 个 LAS 文件".ljust(55) + "║")
+        print(f"║  📂 输出目录: {self.output_dir[:50]:<50} ║")
+        print("╚" + "═" * 68 + "╝")
+        print()
+
+    # ================= 内部辅助方法 =================
+
+    def _infer_class_mapping(self, trainer, pl_module):
+        """推断反向类别映射"""
+        if self.reverse_class_mapping is not None:
+            print(f"  ℹ️  使用用户提供的 reverse_class_mapping")
+            return
+        
+        if not self.auto_infer_reverse_mapping:
+            return
+            
+        # 尝试从模型 checkpoint 获取
+        try:
+            if hasattr(pl_module, 'hparams') and hasattr(pl_module.hparams, 'class_mapping'):
+                mapping = pl_module.hparams.class_mapping
+                if mapping:
+                    self.reverse_class_mapping = {v: k for k, v in mapping.items()}
+                    self._mapping_inferred = True
+                    print(f"  ℹ️  从模型 checkpoint 加载 reverse_class_mapping")
+                    return
+        except Exception:
+            pass
+            
+        # 尝试从 DataModule 获取
+        try:
+            datamodule = trainer.datamodule
+            if hasattr(datamodule, 'class_mapping') and datamodule.class_mapping:
+                self.reverse_class_mapping = {v: k for k, v in datamodule.class_mapping.items()}
+                self._mapping_inferred = True
+                print(f"  ℹ️  从 DataModule 推断 reverse_class_mapping")
+            else:
+                print(f"  ℹ️  未找到 class_mapping，使用连续标签")
+        except Exception as e:
+            print(f"  ⚠️  警告: 无法推断 reverse_class_mapping: {e}")
+
+    def _validate_prediction(self, prediction, batch_idx):
+        if 'logits' not in prediction or 'indices' not in prediction:
+            print(f"  ⚠️  警告: predict_step 必须返回 'logits' 和 'indices'。跳过批次 {batch_idx}")
+            return False
+        if 'bin_file' not in prediction or len(prediction['bin_file']) == 0:
+            print(f"  ⚠️  警告: batch {batch_idx} 缺少 bin_file 信息，跳过")
+            return False
+        return True
+
+    def _save_batch_predictions(self, bin_files, logits, indices, bin_paths, pkl_paths, 
+                                 offsets, batch_idx, pl_module):
+        """将一个批次的预测按文件拆分并保存"""
+        file_groups = defaultdict(lambda: {
+            'logits': [], 'indices': [], 
+            'bin_path': None, 'pkl_path': None
+        })
+        
+        start_idx = 0
+        for i, end_idx in enumerate(offsets):
+            # 获取文件名
+            f = bin_files[i]
+            bin_basename = (f if isinstance(f, str) else str(f))
+            if bin_basename.endswith('.bin'):
+                bin_basename = bin_basename[:-4]
+            
+            # 切片
+            file_groups[bin_basename]['logits'].append(logits[start_idx:end_idx])
+            file_groups[bin_basename]['indices'].append(indices[start_idx:end_idx])
+            
+            # 路径
+            if file_groups[bin_basename]['bin_path'] is None:
+                if isinstance(bin_paths, list) and i < len(bin_paths):
+                    file_groups[bin_basename]['bin_path'] = bin_paths[i]
+                if isinstance(pkl_paths, list) and i < len(pkl_paths):
+                    file_groups[bin_basename]['pkl_path'] = pkl_paths[i]
+            
+            start_idx = end_idx
+            
+        # 保存
+        for bin_basename, data in file_groups.items():
+            if not data['logits']: continue
+            
+            save_path = os.path.join(self.temp_dir, f"{bin_basename}_batch_{batch_idx}.pred.tmp")
+            save_dict = {
+                'logits': torch.cat(data['logits'], dim=0),
+                'indices': torch.cat(data['indices'], dim=0),
+                'bin_file': bin_basename,
+            }
+            if data['bin_path']: save_dict['bin_path'] = data['bin_path']
+            if data['pkl_path']: save_dict['pkl_path'] = data['pkl_path']
+            
+            torch.save(save_dict, save_path)
+
+    def _ensure_num_classes(self, pl_module):
+        if self.num_classes != -1: return
+        
+        try:
+            if hasattr(pl_module, 'head'):
+                if hasattr(pl_module.head, 'out_channels'):
+                    self.num_classes = pl_module.head.out_channels
+                elif hasattr(pl_module.head, 'num_classes'):
+                    self.num_classes = pl_module.head.num_classes
+            elif hasattr(pl_module, 'num_classes'):
+                self.num_classes = pl_module.num_classes
+            print(f"  ℹ️  从模型推断类别数: {self.num_classes}")
+        except Exception:
+            print("  ❌ 错误: 无法从模型推断 num_classes，请显式指定")
+
+    def _group_temp_files(self, tmp_files):
+        groups = defaultdict(list)
+        for f in tmp_files:
+            basename = os.path.basename(f).split('_batch_')[0]
+            groups[basename].append(f)
+        return groups
+
+    def _cleanup_temp_files(self, tmp_files, pl_module):
+        print()
+        print("  🧹 清理临时文件...")
+        for f in tmp_files:
+            try:
+                if os.path.exists(f): os.remove(f)
+            except Exception as e:
+                print(f"  ⚠️  警告: 无法删除 {f}: {e}")
+        
+        try:
+            import shutil
+            if os.path.exists(self.temp_dir):
+                shutil.rmtree(self.temp_dir)
+                print(f"  ✅ 已清理临时文件夹")
+        except Exception as e:
+            print(f"  ⚠️  警告: 清理文件夹失败: {e}")
+
+    def _process_single_bin_file(self, bin_basename, tmp_files, trainer, pl_module):
+        """处理单个 bin 文件的所有预测结果"""
+        # 1. 获取路径
+        bin_path, pkl_path = self._get_file_paths(bin_basename, tmp_files, trainer, pl_module)
+        if not bin_path or not pkl_path: 
+            raise ValueError(f"无法找到 bin/pkl 文件: {bin_basename}")
+
+        # 2. 加载元数据和点云
+        with open(pkl_path, 'rb') as f:
+            metadata = pickle.load(f)
+        point_data = np.memmap(bin_path, dtype=metadata['dtype'], mode='r')
+        num_points = len(point_data)
+        print(f"  │  总点数: {num_points:,}")
+        
+        # 3. 投票
+        final_preds, mean_logits, counts = self._perform_voting(tmp_files, num_points, pl_module)
+        
+        # 统计投票覆盖率
+        covered = (counts > 0).sum().item()
+        coverage = covered / num_points * 100
+        print(f"  │  投票覆盖率: {coverage:.1f}% ({covered:,}/{num_points:,})")
+        
+        # 4. 映射
+        if self.reverse_class_mapping:
+            final_preds = self._apply_mapping(final_preds, pl_module)
+            
+        # 5. 保存 LAS
+        xyz = np.stack([point_data['X'], point_data['Y'], point_data['Z']], axis=1).astype(np.float64)
+        metadata['_bin_path'] = bin_path
+        
+        output_path = os.path.join(self.output_dir, f"{bin_basename}.las")
+        self._save_las_file(output_path, xyz, final_preds, metadata, pl_module)
+        print(f"  │  📄 已保存: {Path(output_path).name}")
+        
+        # 6. 保存 Logits
+        if self.save_logits:
+            logits_path = os.path.join(self.output_dir, f"{bin_basename}_logits.npz")
+            np.savez_compressed(
+                logits_path,
+                logits=mean_logits.numpy(),
+                predictions=final_preds,
+                counts=counts.numpy()
+            )
+            print(f"  │  📄 已保存 Logits: {Path(logits_path).name}")
+
+    def _get_file_paths(self, bin_basename, tmp_files, trainer, pl_module):
+        """获取 bin 和 pkl 文件路径"""
+        # 尝试从临时文件获取
+        if tmp_files:
+            try:
+                data = torch.load(tmp_files[0], weights_only=False)
+                if 'bin_path' in data and 'pkl_path' in data:
+                    bp = data['bin_path']
+                    pp = data['pkl_path']
+                    return (str(bp[0]) if isinstance(bp, list) else str(bp)), \
+                           (str(pp[0]) if isinstance(pp, list) else str(pp))
+            except Exception:
+                pass
+        
+        # 后备方案
+        return self._find_bin_pkl_paths(bin_basename, trainer)
+    
+    def _find_bin_pkl_paths(self, bin_basename: str, trainer: 'pl.Trainer') -> tuple:
+        """根据 bin_basename 查找对应的 bin 和 pkl 文件路径"""
+        try:
+            dataset = trainer.predict_dataloaders.dataset
+            
+            # 在 data_list 中查找匹配的文件
+            for sample_info in dataset.data_list:
+                bin_path = Path(sample_info['bin_path'])
+                if bin_path.stem == bin_basename:
+                    pkl_path = Path(sample_info['pkl_path'])
+                    return str(bin_path), str(pkl_path)
+            
+            # 如果在 data_list 中没找到，尝试从 data_root 搜索
+            data_root = Path(dataset.data_root) if not isinstance(dataset.data_root, (list, tuple)) else Path(dataset.data_root[0]).parent
+            
+            bin_path = data_root / f"{bin_basename}.bin"
+            pkl_path = data_root / f"{bin_basename}.pkl"
+            
+            if bin_path.exists() and pkl_path.exists():
+                return str(bin_path), str(pkl_path)
+            
+            return None, None
+            
+        except Exception as e:
+            print(f"  ❌ 错误: 查找 bin/pkl 文件失败: {e}")
+            return None, None
+
+    def _perform_voting(self, tmp_files, num_points, pl_module):
+        """执行投票"""
+        logits_sum = torch.zeros((num_points, self.num_classes), dtype=torch.float32)
+        counts = torch.zeros(num_points, dtype=torch.int32)
+        
+        for f in tmp_files:
+            try:
+                d = torch.load(f, weights_only=False)
+                logits_sum.index_add_(0, d['indices'].long(), d['logits'].float())
+                counts.index_add_(0, d['indices'].long(), torch.ones(len(d['indices']), dtype=torch.int32))
+            except Exception as e:
+                print(f"  ⚠️  警告: 加载 {f} 失败: {e}")
+                
+        # 计算平均
+        mask = (counts == 0)
+        counts_safe = counts.clone()
+        counts_safe[mask] = 1
+        mean_logits = logits_sum / counts_safe.unsqueeze(-1)
+        
+        # Argmax
+        if mean_logits.ndim == 2 and mean_logits.size(1) > 1:
+            preds = torch.argmax(mean_logits, dim=1).numpy().astype(np.uint8)
+        else:
+            preds = mean_logits.squeeze().numpy().astype(np.uint8)
+            
+        if mask.any():
+            preds[mask.numpy()] = 0
+            
+        return preds, mean_logits, counts
+
+    def _apply_mapping(self, preds, pl_module):
+        """应用反向类别映射"""
+        print(f"  │  应用反向类别映射")
+        max_label = max(self.reverse_class_mapping.keys())
+        mapping = np.arange(max_label + 1)
+        for k, v in self.reverse_class_mapping.items():
+            mapping[k] = v
+        return mapping[preds]
+
+    def _save_las_file(self, las_path: str, xyz: np.ndarray, classification: np.ndarray,
+                       metadata: Dict[str, Any], pl_module: 'pl.LightningModule'):
+        """保存点云为 .las 文件"""
+        try:
+            # 1. 从 metadata 中恢复 LAS 头信息
+            if 'header_info' in metadata:
+                header_info = metadata['header_info']
+                
+                point_format = header_info.get('point_format', 3)
+                version_str = header_info.get('version', '1.2')
+                
+                if isinstance(version_str, str):
+                    version_parts = version_str.split('.')
+                    if len(version_parts) == 2:
+                        major, minor = int(version_parts[0]), int(version_parts[1])
+                    else:
+                        major, minor = 1, 2
+                else:
+                    major, minor = 1, 2
+                
+                header = laspy.LasHeader(point_format=point_format, version=f"{major}.{minor}")
+                
+                header.offsets = [
+                    header_info.get('x_offset', 0),
+                    header_info.get('y_offset', 0),
+                    header_info.get('z_offset', 0)
+                ]
+                header.scales = [
+                    header_info.get('x_scale', 0.01),
+                    header_info.get('y_scale', 0.01),
+                    header_info.get('z_scale', 0.01)
+                ]
+                
+                if 'system_identifier' in header_info:
+                    header.system_identifier = header_info['system_identifier']
+                if 'generating_software' in header_info:
+                    header.generating_software = header_info['generating_software']
+                
+                # 恢复 VLRs
+                if 'vlrs' in header_info and header_info['vlrs']:
+                    for vlr_dict in header_info['vlrs']:
+                        try:
+                            vlr = laspy.VLR(
+                                user_id=vlr_dict['user_id'],
+                                record_id=vlr_dict['record_id'],
+                                description=vlr_dict['description'],
+                                record_data=vlr_dict.get('record_data', b'')
+                            )
+                            header.vlrs.append(vlr)
+                        except Exception as e:
+                            pass
+            else:
+                header = laspy.LasHeader(point_format=3, version='1.2')
+                header.offsets = xyz.min(axis=0)
+                header.scales = np.array([0.001, 0.001, 0.001])
+            
+            # 2. 创建 LAS 数据
+            las = laspy.LasData(header)
+            
+            # 3. 设置坐标
+            las.x = xyz[:, 0]
+            las.y = xyz[:, 1]
+            las.z = xyz[:, 2]
+            
+            # 4. 从原始 bin 文件恢复属性
+            if 'dtype' in metadata:
+                dtype = metadata['dtype']
+                bin_path = metadata.get('_bin_path', None)
+                
+                if bin_path and Path(bin_path).exists():
+                    point_data = np.memmap(bin_path, dtype=dtype, mode='r')
+                    field_names = [name for name, _ in dtype]
+                    
+                    if 'intensity' in field_names:
+                        las.intensity = point_data['intensity']
+                    if 'return_number' in field_names:
+                        las.return_number = point_data['return_number']
+                    if 'number_of_returns' in field_names:
+                        las.number_of_returns = point_data['number_of_returns']
+                    if 'scan_angle_rank' in field_names:
+                        las.scan_angle_rank = point_data['scan_angle_rank']
+                    elif 'scan_angle' in field_names:
+                        las.scan_angle = point_data['scan_angle']
+                    if 'user_data' in field_names:
+                        las.user_data = point_data['user_data']
+                    if 'point_source_id' in field_names:
+                        las.point_source_id = point_data['point_source_id']
+                    if 'gps_time' in field_names:
+                        las.gps_time = point_data['gps_time']
+                    
+                    if header.point_format.id in [2, 3, 5, 7, 8, 10]:
+                        if 'red' in field_names and 'green' in field_names and 'blue' in field_names:
+                            las.red = point_data['red']
+                            las.green = point_data['green']
+                            las.blue = point_data['blue']
+            
+            # 5. 设置预测的分类标签
+            las.classification = classification
+            
+            # 6. 写入文件
+            las.write(las_path)
+            
+        except Exception as e:
+            print(f"  ❌ 错误: 保存 LAS 文件失败: {e}")
+            import traceback
+            traceback.print_exc()
+            raise

@@ -109,6 +109,18 @@ class BaseTask(pl.LightningModule):
                 # 为 val 和 test 分别创建实例，以避免状态冲突
                 self.val_metrics[metric_name] = metric_class(**init_args)
                 self.test_metrics[metric_name] = metric_class(**init_args)
+
+    def configure_optimizers(self):
+        """
+        默认优化器配置。
+        子类或用户可以覆盖此方法以使用自定义优化器。
+        """
+        optimizer = torch.optim.AdamW(
+            self.parameters(), 
+            lr=self.hparams.get('learning_rate', 1e-3), 
+            weight_decay=1e-4
+        )
+        return optimizer
     
     def _custom_save_hparams(self):
         """
@@ -354,6 +366,40 @@ class BaseTask(pl.LightningModule):
         """
         在训练 epoch 结束时调用，清理显存以便验证。
         """
+        # 🔥 调试：检查 trainer 的状态
+        print(f"\n[DEBUG] on_train_epoch_end called!")
+        print(f"[DEBUG]   current_epoch: {self.current_epoch}")
+        print(f"[DEBUG]   trainer.check_val_every_n_epoch: {self.trainer.check_val_every_n_epoch}")
+        print(f"[DEBUG]   trainer.val_check_interval: {self.trainer.val_check_interval}")
+        print(f"[DEBUG]   trainer.limit_val_batches: {self.trainer.limit_val_batches}")
+        print(f"[DEBUG]   trainer.enable_validation: {self.trainer.enable_validation}")
+        
+        # 🔥 检查 val_check_batch (关键!)
+        print(f"[DEBUG]   trainer.val_check_batch: {self.trainer.val_check_batch}")
+        print(f"[DEBUG]   trainer.limit_train_batches: {self.trainer.limit_train_batches}")
+        
+        # 🔥 检查 fit_loop 的状态
+        if hasattr(self.trainer, 'fit_loop'):
+            fit_loop = self.trainer.fit_loop
+            epoch_loop = fit_loop.epoch_loop
+            print(f"[DEBUG]   epoch_loop.batch_progress.is_last_batch: {epoch_loop.batch_progress.is_last_batch}")
+            print(f"[DEBUG]   epoch_loop.batch_idx: {epoch_loop.batch_idx}")
+            print(f"[DEBUG]   epoch_loop.total_batch_idx: {epoch_loop.total_batch_idx}")
+            print(f"[DEBUG]   epoch_loop._num_ready_batches_reached(): {epoch_loop._num_ready_batches_reached()}")
+        
+        # 🔥 检查 val_dataloaders 是否存在
+        try:
+            val_dataloaders = self.trainer.val_dataloaders
+            if val_dataloaders is not None:
+                if hasattr(val_dataloaders, '__len__'):
+                    print(f"[DEBUG]   val_dataloaders length: {len(val_dataloaders)}")
+                else:
+                    print(f"[DEBUG]   val_dataloaders: {type(val_dataloaders)}")
+            else:
+                print(f"[DEBUG]   val_dataloaders is None!")
+        except Exception as e:
+            print(f"[DEBUG]   Error accessing val_dataloaders: {e}")
+        
         # 强制清理 CUDA 缓存，避免验证时 OOM
         if torch.cuda.is_available():
             import gc
@@ -370,6 +416,10 @@ class BaseTask(pl.LightningModule):
         """
         在验证开始前再次清理显存。
         """
+        print(f"\n[DEBUG] on_validation_start called!")
+        # 重置计数器
+        self._val_batch_count = 0
+        
         if torch.cuda.is_available():
             import gc
             gc.collect()
@@ -380,6 +430,13 @@ class BaseTask(pl.LightningModule):
             print(f"[Memory] Validation start: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB\n")
     
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
+        # 🔥 计数器
+        if not hasattr(self, '_val_batch_count'):
+            self._val_batch_count = 0
+        self._val_batch_count += 1
+        
+        if batch_idx == 0:
+            print(f"[DEBUG] validation_step batch_idx=0, batch keys: {batch.keys()}")
         # 1. 前向传播
         preds = self.forward(batch)
         
@@ -400,6 +457,15 @@ class BaseTask(pl.LightningModule):
             metric.update(processed_preds, target)
 
     def on_validation_epoch_end(self):
+        print(f"\n[DEBUG] on_validation_epoch_end called!")
+        print(f"[DEBUG] val_metrics keys: {list(self.val_metrics.keys())}")
+        
+        # 🔥 检查是否有验证 batch 被处理
+        if hasattr(self, '_val_batch_count'):
+            print(f"[DEBUG] _val_batch_count: {self._val_batch_count}")
+        else:
+            print(f"[DEBUG] _val_batch_count NOT SET - validation_step may not have been called!")
+        
         # 5. 在 epoch 结束时，计算并记录所有指标
         metric_results = {}
         

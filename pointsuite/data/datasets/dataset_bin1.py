@@ -177,9 +177,10 @@ class BinPklDataset1(DatasetBase):
         if assets is None:
             assets = ['coord', 'classification']
         
-        # 初始化元数据缓存
+        # 初始化缓存（使用有限大小避免内存溢出）
         self._metadata_cache = {}
-        self._mmap_cache = {}  # memmap 缓存
+        self._metadata_cache_max_size = 4  # 最多缓存 4 个文件的元数据
+        self._mmap_cache = {}  # memmap 缓存（memmap 本身不占太多内存）
         self.h_norm_grid = h_norm_grid
         self.mode = mode
         self.max_loops = max_loops
@@ -237,12 +238,12 @@ class BinPklDataset1(DatasetBase):
                 print(f"警告: {bin_path.name} 未找到，跳过 {pkl_path.name}")
                 continue
             
-            # 加载 pkl 元数据并缓存
+            # 加载 pkl 元数据（只在初始化时使用，不缓存到实例）
             with open(pkl_path, 'rb') as f:
                 metadata = pickle.load(f)
             
-            pkl_key = str(pkl_path)
-            self._metadata_cache[pkl_key] = metadata
+            # 🔥 不再缓存完整元数据，避免多 worker 时内存爆炸
+            # 只提取必要的轻量级信息用于 data_list
             
             grid_size = metadata.get('grid_size', None)
             
@@ -361,8 +362,14 @@ class BinPklDataset1(DatasetBase):
             return max_loops, points_per_loop
     
     def _get_metadata(self, pkl_path: str) -> dict:
-        """获取缓存的元数据"""
+        """获取元数据（带 LRU 缓存限制）"""
         if pkl_path not in self._metadata_cache:
+            # 如果缓存满了，清除最旧的条目
+            if len(self._metadata_cache) >= self._metadata_cache_max_size:
+                # 移除第一个（最旧的）条目
+                oldest_key = next(iter(self._metadata_cache))
+                del self._metadata_cache[oldest_key]
+            
             with open(pkl_path, 'rb') as f:
                 self._metadata_cache[pkl_path] = pickle.load(f)
         return self._metadata_cache[pkl_path]
@@ -828,25 +835,104 @@ class BinPklDataset1(DatasetBase):
         print("="*70)
     
     def get_class_distribution(self) -> Optional[Dict[int, int]]:
-        """获取数据集的类别分布"""
+        """获取数据集的类别分布（累加所有文件）"""
         if len(self.data_list) == 0:
             return {}
         
-        pkl_path = self.data_list[0]['pkl_path']
-        metadata = self._get_metadata(pkl_path)
+        # 收集所有唯一的 pkl 文件
+        pkl_paths = set(s['pkl_path'] for s in self.data_list)
         
-        if 'label_counts' in metadata:
-            if self.class_mapping is not None:
-                mapped_counts = {}
-                for orig_label, count in metadata['label_counts'].items():
-                    if orig_label in self.class_mapping:
-                        new_label = self.class_mapping[orig_label]
-                        mapped_counts[new_label] = mapped_counts.get(new_label, 0) + count
-                return mapped_counts
+        # 累加所有文件的类别分布
+        total_counts = {}
+        for pkl_path in pkl_paths:
+            metadata = self._get_metadata(pkl_path)
+            if 'label_counts' in metadata:
+                for label, count in metadata['label_counts'].items():
+                    total_counts[label] = total_counts.get(label, 0) + count
+        
+        if not total_counts:
+            return {}
+        
+        # 应用类别映射
+        if self.class_mapping is not None:
+            mapped_counts = {}
+            for orig_label, count in total_counts.items():
+                if orig_label in self.class_mapping:
+                    new_label = self.class_mapping[orig_label]
+                    mapped_counts[new_label] = mapped_counts.get(new_label, 0) + count
+            return mapped_counts
+        else:
+            return total_counts
+    
+    def get_sample_weights(self, class_weights: Optional[Dict[int, float]] = None) -> Optional[np.ndarray]:
+        """
+        计算每个样本的权重（用于 WeightedRandomSampler）
+        
+        权重计算策略：
+        - 样本权重 = Σ(样本中包含的每个类别的类别权重)
+        - 包含稀有类别的样本获得更高权重
+        - 包含多个不同类别的样本获得更高权重
+        
+        Args:
+            class_weights: 类别权重字典 {class_id: weight}
+            
+        Returns:
+            样本权重数组 [num_samples]
+        """
+        if class_weights is None or len(self.data_list) == 0:
+            return None
+        
+        weights = np.zeros(len(self.data_list), dtype=np.float32)
+        
+        for i, sample_info in enumerate(self.data_list):
+            pkl_path = sample_info['pkl_path']
+            segment_id = sample_info['segment_id']
+            
+            # 获取元数据
+            metadata = self._get_metadata(pkl_path)
+            
+            # 查找对应的 segment
+            segment_info = None
+            for seg in metadata['segments']:
+                if seg['segment_id'] == segment_id:
+                    segment_info = seg
+                    break
+            
+            if segment_info is None:
+                weights[i] = 1.0
+                continue
+            
+            # 🔥 优先使用 unique_labels（包含的类别列表）
+            unique_labels = segment_info.get('unique_labels', None)
+            
+            if unique_labels is not None and len(unique_labels) > 0:
+                # 计算权重：包含的所有类别的类别权重之和
+                sample_weight = 0.0
+                for label in unique_labels:
+                    if self.class_mapping is not None:
+                        if label in self.class_mapping:
+                            mapped_label = self.class_mapping[label]
+                            sample_weight += class_weights.get(mapped_label, 0.0)
+                    else:
+                        sample_weight += class_weights.get(int(label), 0.0)
+                weights[i] = max(sample_weight, 1e-6)
             else:
-                return metadata['label_counts']
+                # 如果没有 unique_labels，尝试从 label_counts 获取
+                label_counts = segment_info.get('label_counts', {})
+                if label_counts:
+                    sample_weight = 0.0
+                    for orig_label in label_counts.keys():
+                        if self.class_mapping is not None:
+                            if orig_label in self.class_mapping:
+                                mapped_label = self.class_mapping[orig_label]
+                                sample_weight += class_weights.get(mapped_label, 0.0)
+                        else:
+                            sample_weight += class_weights.get(int(orig_label), 0.0)
+                    weights[i] = max(sample_weight, 1e-6)
+                else:
+                    weights[i] = 1.0
         
-        return {}
+        return weights
     
     def get_sample_num_points(self) -> List[int]:
         """

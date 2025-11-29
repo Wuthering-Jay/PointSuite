@@ -147,7 +147,16 @@ class DynamicBatchSampler:
         self.num_points_list = self._get_num_points_list()
         
     def _get_num_points_list(self):
-        """获取每个样本的点数（考虑 loop 参数）"""
+        """获取每个样本的点数（考虑 loop 参数和采样模式）"""
+        
+        # 🔥 优先使用 get_sample_num_points() 方法（支持体素模式的正确点数）
+        if hasattr(self.dataset, 'get_sample_num_points'):
+            num_points_list = self.dataset.get_sample_num_points()
+            # 如果 dataset 有 loop 参数，需要扩展列表
+            if hasattr(self.dataset, 'loop') and self.dataset.loop > 1:
+                num_points_list = num_points_list * self.dataset.loop
+            return num_points_list
+        
         base_num_points_list = []
         
         # 尝试从 dataset.data_list 获取

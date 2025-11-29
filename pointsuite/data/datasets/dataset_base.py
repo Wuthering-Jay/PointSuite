@@ -253,9 +253,10 @@ class DatasetBase(Dataset, ABC):
         else:
             raise ValueError(f"未知的权重计算方法: {method}")
         
-        # 归一化
+        # 归一化：使最小权重为1，而不是总和为1
+        # 这样权重更直观：稀有类别权重高，常见类别权重约为1
         if normalize:
-            weights = weights / weights.sum()
+            weights = weights / weights.min()  # 最小权重变为1
         
         # 转换为字典
         return {i: float(weights[i]) for i in range(num_classes) if counts[i] > 0}
@@ -264,10 +265,10 @@ class DatasetBase(Dataset, ABC):
     def class_weights(self):
         """
         获取类别权重 Tensor (用于 Loss)
-        默认使用 log_inverse 方法计算
+        使用 sqrt_inverse 方法计算，比 log_inverse 有更大的权重差异
         """
         if self._class_weights is None:
-            weights_dict = self.compute_class_weights(method='log_inverse')
+            weights_dict = self.compute_class_weights(method='sqrt_inverse')
             if weights_dict is None:
                 return None
             
@@ -287,7 +288,7 @@ class DatasetBase(Dataset, ABC):
         获取类别权重字典
         """
         if self._class_weights_dict is None:
-             self._class_weights_dict = self.compute_class_weights(method='log_inverse')
+             self._class_weights_dict = self.compute_class_weights(method='sqrt_inverse')
         return self._class_weights_dict
 
 
