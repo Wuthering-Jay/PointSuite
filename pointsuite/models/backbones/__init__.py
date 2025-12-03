@@ -1,0 +1,1 @@
+from .ptv2.point_transformer_v2m5 import PointTransformerV2

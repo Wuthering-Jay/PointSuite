@@ -56,7 +56,7 @@ def create_reverse_class_mapping(class_mapping: ClassMappingInput) -> Optional[D
     return create_reverse_mapping(class_mapping)
 
 
-class SemanticPredictLasWriter(BasePredictionWriter):
+class SemanticPredictLasWriter_old(BasePredictionWriter):
     """
     用于语义分割的 PredictionWriter 回调 (适配 bin+pkl 数据格式)
     
@@ -888,7 +888,7 @@ class TextLoggingCallback(Callback):
 # SemanticPredictLasWriter1: 适配 tile_las1.py 逻辑索引格式
 # ============================================================================
 
-class SemanticPredictLasWriter1(BasePredictionWriter):
+class SemanticPredictLasWriter(BasePredictionWriter):
     """
     用于语义分割的 PredictionWriter 回调 (适配 tile_las1.py 逻辑索引格式)
     

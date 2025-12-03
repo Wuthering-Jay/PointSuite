@@ -1,0 +1,109 @@
+# DALES 实验配置
+# 
+# 这是一个完整的语义分割实验配置文件
+# 通过引用 defaults 中的子配置文件组合完整配置
+#
+# 使用方式:
+#   python main.py --config configs/experiments/dales_semseg.yaml
+#   python main.py --config configs/experiments/dales_semseg.yaml --run.mode test
+
+defaults:
+  - data: dales.yaml
+  - model: ptv2_semseg.yaml
+  - trainer: default.yaml
+
+# ========================================================================
+# 运行配置
+# ========================================================================
+run:
+  mode: train  # train/resume/finetune/test/predict
+  seed: 42
+  output_dir: ./outputs/dales_semseg
+  checkpoint_path: null  # resume/finetune/test 时使用
+
+# ========================================================================
+# 任务配置 (覆盖 defaults)
+# ========================================================================
+task:
+  class_path: pointsuite.tasks.SemanticSegmentationTask
+  init_args:
+    learning_rate: 1e-3
+    # 从 data 配置引用类别信息
+    class_mapping: ${data.class_mapping}
+    class_names: ${data.class_names}
+    ignore_label: ${data.ignore_label}
+
+# ========================================================================
+# 损失函数配置
+# ========================================================================
+losses:
+  - name: ce_loss
+    class_path: pointsuite.models.losses.CrossEntropyLoss
+    init_args:
+      ignore_index: ${data.ignore_label}
+      # weight 会在 engine 中自动从 datamodule 获取
+    weight: 1.0
+    
+  # 可选的额外损失
+  # - name: lovasz_loss
+  #   class_path: pointsuite.models.losses.LovaszLoss
+  #   init_args:
+  #     ignore_index: ${data.ignore_label}
+  #     mode: multiclass
+  #   weight: 1.0
+
+# ========================================================================
+# 指标配置
+# ========================================================================
+metrics:
+  - name: seg_metrics
+    class_path: pointsuite.utils.metrics.semantic_segmentation.SegmentationMetrics
+    init_args:
+      num_classes: ${data.num_classes}
+      ignore_index: ${data.ignore_label}
+      class_names: ${data.class_names}
+
+# ========================================================================
+# 回调配置
+# ========================================================================
+callbacks:
+  model_checkpoint:
+    monitor: mean_iou
+    mode: max
+    save_top_k: 3
+    save_last: true
+    filename: '{epoch:02d}-{mean_iou:.4f}'
+    verbose: true
+    
+  early_stopping:
+    monitor: mean_iou
+    patience: 20
+    mode: max
+    verbose: true
+    
+  predict_writer:
+    class_path: pointsuite.utils.callbacks.SemanticPredictLasWriter
+    init_args:
+      output_dir: ${run.output_dir}/predictions
+      save_logits: false
+      auto_infer_reverse_mapping: true
+
+# ========================================================================
+# 优化器配置
+# ========================================================================
+optimizer:
+  class_path: torch.optim.AdamW
+  init_args:
+    lr: ${task.init_args.learning_rate}
+    weight_decay: 1e-4
+
+# ========================================================================
+# 学习率调度器配置
+# ========================================================================
+lr_scheduler:
+  class_path: torch.optim.lr_scheduler.CosineAnnealingLR
+  init_args:
+    T_max: null  # 会在 engine 中自动设置为 total_steps
+    eta_min: 1e-6
+  interval: step
+  frequency: 1

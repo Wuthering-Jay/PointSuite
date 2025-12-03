@@ -1,4 +1,4 @@
-from ..modules.point_wise import *
+from ...modules.point_wise import *
 from timm.layers import DropPath
 from copy import deepcopy
 
