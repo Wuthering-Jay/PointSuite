@@ -76,10 +76,6 @@ class BaseTask(pl.LightningModule):
         # 保存 class_mapping 用于 SemanticPredictLasWriter
         self.class_mapping = class_mapping
         
-        # 追踪最佳 mIoU
-        self.best_miou = 0.0
-        self.best_miou_epoch = -1
-        
         # 🔥 自定义 hparams 保存钩子，确保中文正确显示
         self._custom_save_hparams()
         
@@ -302,14 +298,6 @@ class BaseTask(pl.LightningModule):
         if batch_idx == 0:
             self.train()
         
-        # 调试信息：记录训练步数和数据统计
-        if batch_idx % 50 == 0 or batch_idx > 160:  # 在问题区域附近更频繁记录
-            coord = batch.get('coord', None)
-            if coord is not None:
-                print(f"\n[Step {self.global_step}] Batch {batch_idx}: "
-                      f"points={len(coord)}, "
-                      f"coord_range=[{coord.min(0)[0]}, {coord.max(0)[0]}]")
-        
         # 前向传播
         try:
             preds = self(batch)
@@ -336,10 +324,10 @@ class BaseTask(pl.LightningModule):
         total_loss = loss_dict["total_loss"]
         
         # 保存最新的 loss 到模块中，供 CustomProgressBar 直接读取
-        # 避免 PL 默认进度条的平滑处理导致数值看起来“卡死”
+        # 避免 PL 默认进度条的平滑处理导致数值看起来"卡死"
         current_loss = total_loss.item()
         self.last_loss = current_loss
-        # 🔥 强制更新 trainer 上的属性，确保 CustomProgressBar 能读取到最新值
+        # 强制更新 trainer 上的属性，确保 CustomProgressBar 能读取到最新值
         if self.trainer is not None:
             self.trainer.live_loss = current_loss
         
@@ -355,10 +343,6 @@ class BaseTask(pl.LightningModule):
                 prog_bar=True,
                 batch_size=batch_size,
             )
-            
-        # 调试：每 100 步打印一次 loss，确认是否在变化
-        if batch_idx % 100 == 0:
-            print(f" [Step {self.global_step}] Loss: {total_loss.item():.6f}")
         
         return total_loss
 
@@ -366,77 +350,24 @@ class BaseTask(pl.LightningModule):
         """
         在训练 epoch 结束时调用，清理显存以便验证。
         """
-        # 🔥 调试：检查 trainer 的状态
-        print(f"\n[DEBUG] on_train_epoch_end called!")
-        print(f"[DEBUG]   current_epoch: {self.current_epoch}")
-        print(f"[DEBUG]   trainer.check_val_every_n_epoch: {self.trainer.check_val_every_n_epoch}")
-        print(f"[DEBUG]   trainer.val_check_interval: {self.trainer.val_check_interval}")
-        print(f"[DEBUG]   trainer.limit_val_batches: {self.trainer.limit_val_batches}")
-        print(f"[DEBUG]   trainer.enable_validation: {self.trainer.enable_validation}")
-        
-        # 🔥 检查 val_check_batch (关键!)
-        print(f"[DEBUG]   trainer.val_check_batch: {self.trainer.val_check_batch}")
-        print(f"[DEBUG]   trainer.limit_train_batches: {self.trainer.limit_train_batches}")
-        
-        # 🔥 检查 fit_loop 的状态
-        if hasattr(self.trainer, 'fit_loop'):
-            fit_loop = self.trainer.fit_loop
-            epoch_loop = fit_loop.epoch_loop
-            print(f"[DEBUG]   epoch_loop.batch_progress.is_last_batch: {epoch_loop.batch_progress.is_last_batch}")
-            print(f"[DEBUG]   epoch_loop.batch_idx: {epoch_loop.batch_idx}")
-            print(f"[DEBUG]   epoch_loop.total_batch_idx: {epoch_loop.total_batch_idx}")
-            print(f"[DEBUG]   epoch_loop._num_ready_batches_reached(): {epoch_loop._num_ready_batches_reached()}")
-        
-        # 🔥 检查 val_dataloaders 是否存在
-        try:
-            val_dataloaders = self.trainer.val_dataloaders
-            if val_dataloaders is not None:
-                if hasattr(val_dataloaders, '__len__'):
-                    print(f"[DEBUG]   val_dataloaders length: {len(val_dataloaders)}")
-                else:
-                    print(f"[DEBUG]   val_dataloaders: {type(val_dataloaders)}")
-            else:
-                print(f"[DEBUG]   val_dataloaders is None!")
-        except Exception as e:
-            print(f"[DEBUG]   Error accessing val_dataloaders: {e}")
-        
         # 强制清理 CUDA 缓存，避免验证时 OOM
-        if torch.cuda.is_available():
-            import gc
-            gc.collect()  # Python 垃圾回收
-            torch.cuda.empty_cache()  # CUDA 缓存清理
-            torch.cuda.synchronize()  # 同步 CUDA 操作
-            # 输出显存使用情况
-            allocated = torch.cuda.memory_allocated() / 1024**3
-            reserved = torch.cuda.memory_reserved() / 1024**3
-            print(f"\n[Memory] Epoch {self.current_epoch} training end: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB")
-            print(f"[Memory] Cleared cache and GC, starting validation...\n")
-    
-    def on_validation_start(self):
-        """
-        在验证开始前再次清理显存。
-        """
-        print(f"\n[DEBUG] on_validation_start called!")
-        # 重置计数器
-        self._val_batch_count = 0
-        
         if torch.cuda.is_available():
             import gc
             gc.collect()
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
-            allocated = torch.cuda.memory_allocated() / 1024**3
-            reserved = torch.cuda.memory_reserved() / 1024**3
-            print(f"[Memory] Validation start: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB\n")
+    
+    def on_validation_start(self):
+        """
+        在验证开始前再次清理显存。
+        """
+        if torch.cuda.is_available():
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
     
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
-        # 🔥 计数器
-        if not hasattr(self, '_val_batch_count'):
-            self._val_batch_count = 0
-        self._val_batch_count += 1
-        
-        if batch_idx == 0:
-            print(f"[DEBUG] validation_step batch_idx=0, batch keys: {batch.keys()}")
         # 1. 前向传播
         preds = self.forward(batch)
         
@@ -457,16 +388,12 @@ class BaseTask(pl.LightningModule):
             metric.update(processed_preds, target)
 
     def on_validation_epoch_end(self):
-        print(f"\n[DEBUG] on_validation_epoch_end called!")
-        print(f"[DEBUG] val_metrics keys: {list(self.val_metrics.keys())}")
+        """
+        在验证 epoch 结束时计算并记录所有指标
         
-        # 🔥 检查是否有验证 batch 被处理
-        if hasattr(self, '_val_batch_count'):
-            print(f"[DEBUG] _val_batch_count: {self._val_batch_count}")
-        else:
-            print(f"[DEBUG] _val_batch_count NOT SET - validation_step may not have been called!")
-        
-        # 5. 在 epoch 结束时，计算并记录所有指标
+        子类可以覆盖 _print_validation_metrics() 来自定义打印格式
+        """
+        # 在 epoch 结束时，计算并记录所有指标
         metric_results = {}
         
         # 临时存储用于打印的指标
@@ -489,16 +416,6 @@ class BaseTask(pl.LightningModule):
                 # 保存完整结果用于打印
                 print_metrics.update(val)
                 
-                # 如果包含混淆矩阵相关的详细信息，尝试提取
-                if 'iou_per_class' in val:
-                    print_metrics['per_class_iou'] = val['iou_per_class']
-                if 'precision_per_class' in val:
-                    print_metrics['per_class_precision'] = val['precision_per_class']
-                if 'recall_per_class' in val:
-                    print_metrics['per_class_recall'] = val['recall_per_class']
-                if 'f1_per_class' in val:
-                    print_metrics['per_class_f1'] = val['f1_per_class']
-                
             else:
                 metric_results[name] = val
                 print_metrics[name] = val
@@ -508,88 +425,32 @@ class BaseTask(pl.LightningModule):
         # 记录指标 (prog_bar=False 以避免污染进度条)
         self.log_dict(metric_results, on_step=False, on_epoch=True, prog_bar=False)
         
-        # --- 打印详细指标 ---
-        # 检查是否有 mIoU 信息 (无论是来自 SegmentationMetrics 还是单独的 MeanIoU)
-        miou_key = 'mean_iou'
-        if miou_key in print_metrics:
-            try:
-                current_miou = float(print_metrics[miou_key])
-                
-                # 更新最佳 mIoU
-                if current_miou > self.best_miou:
-                    self.best_miou = current_miou
-                    self.best_miou_epoch = self.current_epoch
-                
-                # 获取其他指标
-                overall_acc = print_metrics.get('overall_accuracy', None)
-                
-                # 准备每类指标
-                per_class_iou = print_metrics.get('per_class_iou', None)
-                per_class_precision = print_metrics.get('per_class_precision', None)
-                per_class_recall = print_metrics.get('per_class_recall', None)
-                per_class_f1 = print_metrics.get('per_class_f1', None)
-                
-                # 如果没有直接提供每类指标，尝试从旧的 MeanIoU metric 对象中获取 (兼容旧代码)
-                if per_class_iou is None and 'mean_iou' in self.val_metrics:
-                    metric = self.val_metrics['mean_iou']
-                    if hasattr(metric, 'confusion_matrix'):
-                        confmat = metric.confusion_matrix.cpu().numpy()
-                        import numpy as np
-                        intersection = np.diag(confmat)
-                        union = confmat.sum(1) + confmat.sum(0) - np.diag(confmat)
-                        per_class_iou = intersection / (union + 1e-10)
-                        per_class_precision = intersection / (confmat.sum(0) + 1e-10)
-                        per_class_recall = intersection / (confmat.sum(1) + 1e-10)
-                        per_class_f1 = 2 * per_class_precision * per_class_recall / (per_class_precision + per_class_recall + 1e-10)
-
-                # 输出标题和总体指标
-                print(f"\n{'='*100}")
-                print(f"Validation Epoch {self.current_epoch} - Metrics")
-                print(f"{'='*100}")
-                if overall_acc is not None:
-                    print(f"Overall Accuracy: {overall_acc:.4f} ({overall_acc*100:.2f}%)")
-                print(f"Mean IoU (current): {current_miou:.4f}")
-                print(f"Mean IoU (best)   : {self.best_miou:.4f} (Epoch {self.best_miou_epoch})")
-                if current_miou > self.best_miou - 1e-6:  # 当前是最佳
-                    print(f"🎉 New best mIoU achieved!")
-                print(f"{'='*100}")
-                
-                # 输出每个类别的详细指标
-                if per_class_iou is not None:
-                    print(f"  {'Class':15s}  {'IoU':>8s}  {'Precision':>10s}  {'Recall':>8s}  {'F1-Score':>10s}")
-                    print(f"  {'-'*15}  {'-'*8}  {'-'*10}  {'-'*8}  {'-'*10}")
-                    
-                    # 获取类别名
-                    class_names = print_metrics.get('class_names', None)
-                    if class_names is None:
-                        class_names = self.hparams.get('class_names', None) if hasattr(self, 'hparams') else None
-                    
-                    import numpy as np
-                    # 确保是 numpy 数组
-                    if isinstance(per_class_iou, torch.Tensor): per_class_iou = per_class_iou.cpu().numpy()
-                    if isinstance(per_class_precision, torch.Tensor): per_class_precision = per_class_precision.cpu().numpy()
-                    if isinstance(per_class_recall, torch.Tensor): per_class_recall = per_class_recall.cpu().numpy()
-                    if isinstance(per_class_f1, torch.Tensor): per_class_f1 = per_class_f1.cpu().numpy()
-
-                    num_classes = len(per_class_iou)
-                    for i in range(num_classes):
-                        c_name = class_names[i] if class_names and i < len(class_names) else f"Class {i}"
-                        print(f"  {c_name:15s}  {per_class_iou[i]:8.4f}  {per_class_precision[i]:10.4f}  "
-                              f"{per_class_recall[i]:8.4f}  {per_class_f1[i]:10.4f}")
-                    
-                    # 计算平均指标
-                    mean_precision = np.nanmean(per_class_precision)
-                    mean_recall = np.nanmean(per_class_recall)
-                    mean_f1 = np.nanmean(per_class_f1)
-                    
-                    print(f"  {'-'*15}  {'-'*8}  {'-'*10}  {'-'*8}  {'-'*10}")
-                    print(f"  {'Mean':15s}  {current_miou:8.4f}  {mean_precision:10.4f}  "
-                          f"{mean_recall:8.4f}  {mean_f1:10.4f}")
-                print(f"{'='*100}\n")
-            except Exception as e:
-                print(f"Warning: Could not print detailed metrics: {e}")
-                import traceback
-                traceback.print_exc()
+        # 调用钩子方法来打印详细指标（子类可覆盖）
+        self._print_validation_metrics(print_metrics)
+    
+    def _print_validation_metrics(self, print_metrics: Dict[str, Any]):
+        """
+        打印验证指标的钩子方法
+        
+        默认实现只打印基本指标。
+        语义分割等任务可以覆盖此方法来打印详细的每类指标。
+        
+        Args:
+            print_metrics: 包含所有计算出的指标的字典
+        """
+        # 默认：只打印简单的摘要
+        display_epoch = self.current_epoch + 1
+        print(f"\n{'='*60}")
+        print(f"Validation Epoch {display_epoch} - Metrics")
+        print(f"{'='*60}")
+        
+        for name, value in print_metrics.items():
+            if isinstance(value, (float, int)):
+                print(f"  {name}: {value:.4f}")
+            elif isinstance(value, torch.Tensor) and value.numel() == 1:
+                print(f"  {name}: {value.item():.4f}")
+        
+        print(f"{'='*60}\n")
 
     # --- 测试 (Test) 逻辑 ---
     
@@ -612,6 +473,11 @@ class BaseTask(pl.LightningModule):
             metric.update(processed_preds, target)
 
     def on_test_epoch_end(self):
+        """
+        在测试 epoch 结束时计算并记录所有指标
+        
+        子类可以覆盖 _print_test_metrics() 来自定义打印格式
+        """
         # 在 epoch 结束时，计算并记录所有指标
         metric_results = {}
         print_metrics = {}
@@ -628,15 +494,6 @@ class BaseTask(pl.LightningModule):
                         metric_results[k] = v
                 
                 print_metrics.update(val)
-                
-                if 'iou_per_class' in val:
-                    print_metrics['per_class_iou'] = val['iou_per_class']
-                if 'precision_per_class' in val:
-                    print_metrics['per_class_precision'] = val['precision_per_class']
-                if 'recall_per_class' in val:
-                    print_metrics['per_class_recall'] = val['recall_per_class']
-                if 'f1_per_class' in val:
-                    print_metrics['per_class_f1'] = val['f1_per_class']
             else:
                 metric_results[name] = val
                 print_metrics[name] = val
@@ -645,65 +502,28 @@ class BaseTask(pl.LightningModule):
             
         self.log_dict(metric_results, on_step=False, on_epoch=True)
         
-        # --- 打印详细指标 ---
-        miou_key = 'mean_iou'
-        if miou_key in print_metrics:
-            try:
-                current_miou = float(print_metrics[miou_key])
-                overall_acc = print_metrics.get('overall_accuracy', None)
-                
-                per_class_iou = print_metrics.get('per_class_iou', None)
-                per_class_precision = print_metrics.get('per_class_precision', None)
-                per_class_recall = print_metrics.get('per_class_recall', None)
-                per_class_f1 = print_metrics.get('per_class_f1', None)
-                
-                # 兼容旧代码
-                if per_class_iou is None and 'mean_iou' in self.test_metrics:
-                    metric = self.test_metrics['mean_iou']
-                    if hasattr(metric, 'confusion_matrix'):
-                        confmat = metric.confusion_matrix.cpu().numpy()
-                        import numpy as np
-                        intersection = np.diag(confmat)
-                        union = confmat.sum(1) + confmat.sum(0) - np.diag(confmat)
-                        per_class_iou = intersection / (union + 1e-10)
-                        per_class_precision = intersection / (confmat.sum(0) + 1e-10)
-                        per_class_recall = intersection / (confmat.sum(1) + 1e-10)
-                        per_class_f1 = 2 * per_class_precision * per_class_recall / (per_class_precision + per_class_recall + 1e-10)
-
-                print(f"\n{'='*100}")
-                print(f"Test Results - Metrics")
-                print(f"{'='*100}")
-                if overall_acc is not None:
-                    print(f"Overall Accuracy: {overall_acc:.4f} ({overall_acc*100:.2f}%)")
-                print(f"Mean IoU: {current_miou:.4f}")
-                print(f"{'='*100}")
-                
-                if per_class_iou is not None:
-                    print(f"  {'Class':15s}  {'IoU':>8s}  {'Precision':>10s}  {'Recall':>8s}  {'F1-Score':>10s}")
-                    print(f"  {'-'*15}  {'-'*8}  {'-'*10}  {'-'*8}  {'-'*10}")
-                    
-                    class_names = print_metrics.get('class_names', None)
-                    if class_names is None:
-                        class_names = self.hparams.get('class_names', None) if hasattr(self, 'hparams') else None
-                    
-                    import numpy as np
-                    if isinstance(per_class_iou, torch.Tensor): per_class_iou = per_class_iou.cpu().numpy()
-                    if isinstance(per_class_precision, torch.Tensor): per_class_precision = per_class_precision.cpu().numpy()
-                    if isinstance(per_class_recall, torch.Tensor): per_class_recall = per_class_recall.cpu().numpy()
-                    if isinstance(per_class_f1, torch.Tensor): per_class_f1 = per_class_f1.cpu().numpy()
-
-                    num_classes = len(per_class_iou)
-                    for i in range(num_classes):
-                        c_name = class_names[i] if class_names and i < len(class_names) else f"Class {i}"
-                        print(f"  {c_name:15s}  {per_class_iou[i]:8.4f}  {per_class_precision[i]:10.4f}  "
-                              f"{per_class_recall[i]:8.4f}  {per_class_f1[i]:10.4f}")
-                    
-                    mean_precision = np.nanmean(per_class_precision)
-                    mean_recall = np.nanmean(per_class_recall)
-                    mean_f1 = np.nanmean(per_class_f1)
-                    
-                    print(f"  {'-'*15}  {'-'*8}  {'-'*10}  {'-'*8}  {'-'*10}")
-                    print(f"  {'Mean':15s}  {current_miou:8.4f}  {mean_precision:10.4f}  {mean_recall:8.4f}  {mean_f1:10.4f}")
-                print(f"{'='*100}\n")
-            except Exception as e:
-                print(f"警告: 无法打印详细指标: {e}")
+        # 调用钩子方法来打印详细指标（子类可覆盖）
+        self._print_test_metrics(print_metrics)
+    
+    def _print_test_metrics(self, print_metrics: Dict[str, Any]):
+        """
+        打印测试指标的钩子方法
+        
+        默认实现只打印基本指标。
+        语义分割等任务可以覆盖此方法来打印详细的每类指标。
+        
+        Args:
+            print_metrics: 包含所有计算出的指标的字典
+        """
+        # 默认：只打印简单的摘要
+        print(f"\n{'='*60}")
+        print(f"Test Results - Metrics")
+        print(f"{'='*60}")
+        
+        for name, value in print_metrics.items():
+            if isinstance(value, (float, int)):
+                print(f"  {name}: {value:.4f}")
+            elif isinstance(value, torch.Tensor) and value.numel() == 1:
+                print(f"  {name}: {value.item():.4f}")
+        
+        print(f"{'='*60}\n")

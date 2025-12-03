@@ -1,50 +1,86 @@
 import os
-
-# 限制线程数，避免小任务的线程调度开销（维持之前的优化）
-os.environ['NUMBA_NUM_THREADS'] = '8'
-os.environ['MKL_NUM_THREADS'] = '8'
-os.environ['OMP_NUM_THREADS'] = '8'
-
 import numpy as np
 import laspy
 import pickle
+import time
+import multiprocessing
+import math
 from pathlib import Path
 from typing import Union, List, Tuple, Optional, Dict, Any
-from sklearn.neighbors import KDTree
 from tqdm import tqdm
-from collections import defaultdict
 from numba import jit, prange
+from sklearn.neighbors import KDTree
 
+# ============================================================================
+# 美化输出辅助类
+# ============================================================================
+
+class Colors:
+    """ANSI 颜色代码"""
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    RESET = '\033[0m'
+
+def format_size(size_bytes: float) -> str:
+    """格式化文件大小"""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f} TB"
+
+def format_time(seconds: float) -> str:
+    """格式化时间"""
+    if seconds < 1:
+        return f"{seconds*1000:.0f}ms"
+    elif seconds < 60:
+        return f"{seconds:.2f}s"
+    else:
+        return f"{seconds/60:.2f}min"
+
+def format_number(num: int) -> str:
+    """格式化大数字（千分位分隔）"""
+    return f"{num:,}"
+
+# ============================================================================
+# Numba 加速函数 (哈希与坐标计算)
+# ============================================================================
+
+@jit(nopython=True, parallel=True)
+def compute_grid_coord_numba(coord, grid_size):
+    """计算网格坐标"""
+    n = coord.shape[0]
+    grid_coord = np.empty_like(coord, dtype=np.int64)
+    for i in prange(n):
+        for j in range(3):
+            grid_coord[i, j] = np.floor(coord[i, j] / grid_size)
+    return grid_coord
 
 @jit(nopython=True, parallel=True)
 def ravel_hash_vec_numba(arr, arr_min, arr_max):
-    """
-    Ravel hash function accelerated with numba.
-    
-    Args:
-        arr: Input coordinates array (N, 3)
-        arr_min: Minimum coordinates for each dimension
-        arr_max: Maximum coordinates for each dimension
-        
-    Returns:
-        Hash keys for each point
-    """
+    """计算空间哈希值"""
     n = arr.shape[0]
     d = arr.shape[1]
     keys = np.zeros(n, dtype=np.uint64)
     
-    # Normalize coordinates
+    # 归一化并转换为 uint64
     arr_normalized = np.empty_like(arr, dtype=np.uint64)
     for i in prange(n):
         for j in range(d):
             arr_normalized[i, j] = np.uint64(arr[i, j] - arr_min[j])
     
-    # Calculate max + 1 for each dimension
+    # 计算每一维度的跨度
     arr_max_plus_one = np.empty(d, dtype=np.uint64)
     for j in range(d):
         arr_max_plus_one[j] = np.uint64(arr_max[j] - arr_min[j] + 1)
     
-    # Fortran style indexing
+    # Fortran style flatten
     for i in prange(n):
         key = np.uint64(0)
         for j in range(d - 1):
@@ -55,360 +91,135 @@ def ravel_hash_vec_numba(arr, arr_min, arr_max):
     
     return keys
 
+# ============================================================================
+# 核心处理类
+# ============================================================================
 
-@jit(nopython=True, parallel=True)
-def compute_grid_coord_numba(coord, grid_size):
-    """
-    Compute grid coordinates accelerated with numba.
-    
-    Args:
-        coord: Point coordinates (N, 3)
-        grid_size: Grid size for sampling
-        
-    Returns:
-        grid_coord: Grid coordinates (N, 3)
-        scaled_coord: Scaled coordinates (N, 3)
-    """
-    n = coord.shape[0]
-    scaled_coord = coord / grid_size
-    grid_coord = np.floor(scaled_coord).astype(np.int64)
-    return grid_coord, scaled_coord
-
-
-@jit(nopython=True)
-def shuffle_within_voxels_numba(idx_sort, cumsum_counts, count):
-    """
-    Shuffle points within each voxel using numba.
-    
-    Args:
-        idx_sort: Sorted indices
-        cumsum_counts: Cumulative sum of voxel counts
-        count: Number of points in each voxel
-        
-    Returns:
-        Shuffled idx_sort array
-    """
-    idx_sort_shuffled = idx_sort.copy()
-    
-    for i in range(len(count)):
-        start_idx = cumsum_counts[i]
-        end_idx = cumsum_counts[i + 1]
-        
-        # Fisher-Yates shuffle algorithm
-        for j in range(end_idx - start_idx - 1, 0, -1):
-            k = np.random.randint(0, j + 1)
-            # Swap
-            temp = idx_sort_shuffled[start_idx + j]
-            idx_sort_shuffled[start_idx + j] = idx_sort_shuffled[start_idx + k]
-            idx_sort_shuffled[start_idx + k] = temp
-    
-    return idx_sort_shuffled
-
-
-@jit(nopython=True)
-def sample_voxels_numba(idx_sort, cumsum_counts, count, num_loops, max_loops, points_per_loop):
-    """
-    Sample points from voxels using numba acceleration.
-    
-    Args:
-        idx_sort: Sorted (and possibly shuffled) indices
-        cumsum_counts: Cumulative sum of voxel counts
-        count: Number of points in each voxel
-        num_loops: Number of sampling loops
-        max_loops: Maximum loops threshold
-        points_per_loop: Points to sample per loop in extreme cases
-        
-    Returns:
-        List of sampled index arrays
-    """
-    num_voxels = len(count)
-    
-    # Pre-allocate result arrays
-    result_list = []
-    
-    for loop_idx in range(num_loops):
-        # Estimate size for this loop
-        estimated_size = 0
-        for voxel_idx in range(num_voxels):
-            voxel_count = count[voxel_idx]
-            if voxel_count <= max_loops:
-                estimated_size += 1
-            else:
-                sample_start = loop_idx * points_per_loop
-                sample_end = min(sample_start + points_per_loop, voxel_count)
-                if sample_start < voxel_count:
-                    estimated_size += (sample_end - sample_start)
-        
-        # Allocate array for this loop
-        idx_part = np.empty(estimated_size, dtype=np.int64)
-        current_pos = 0
-        
-        for voxel_idx in range(num_voxels):
-            voxel_count = count[voxel_idx]
-            start_idx = cumsum_counts[voxel_idx]
-            
-            if voxel_count <= max_loops:
-                # Normal case: sample one point
-                local_idx = loop_idx % voxel_count
-                idx_part[current_pos] = idx_sort[start_idx + local_idx]
-                current_pos += 1
-            else:
-                # Extreme case: sample multiple points
-                sample_start = loop_idx * points_per_loop
-                sample_end = min(sample_start + points_per_loop, voxel_count)
-                
-                if sample_start < voxel_count:
-                    for local_idx in range(sample_start, sample_end):
-                        idx_part[current_pos] = idx_sort[start_idx + local_idx]
-                        current_pos += 1
-        
-        # Only keep the filled portion
-        if current_pos > 0:
-            result_list.append(idx_part[:current_pos])
-    
-    return result_list
-
-
-class GridSampler:
-    """
-    Grid sampling for point clouds using ravel hash with numba acceleration.
-    Only returns point indices in test mode.
-    """
-    
-    def __init__(self, grid_size=0.05, max_loops=30, shuffle_points=True):
-        """
-        Initialize grid sampler.
-        
-        Args:
-            grid_size: Size of the grid cell for sampling
-            max_loops: Maximum number of sampling iterations (to avoid extreme cases)
-            shuffle_points: Whether to shuffle points within each voxel for randomness
-        """
-        self.grid_size = grid_size
-        self.max_loops = max_loops
-        self.shuffle_points = shuffle_points
-    
-    def sample(self, points: np.ndarray) -> List[np.ndarray]:
-        """
-        Perform grid sampling on point cloud (test mode).
-        Returns list of index arrays for each sampling iteration.
-        
-        Args:
-            points: Point cloud array (N, 3) containing xyz coordinates
-            
-        Returns:
-            List of index arrays, each corresponding to one sampling iteration
-        """
-        # 1. Compute grid coordinates using numba
-        grid_coord, scaled_coord = compute_grid_coord_numba(
-            points.astype(np.float64), 
-            np.float64(self.grid_size)
-        )
-        
-        # 2. Normalize grid coordinates
-        min_coord = grid_coord.min(0)
-        grid_coord = grid_coord - min_coord
-        
-        # 3. Compute hash using numba
-        arr_min = np.zeros(3, dtype=np.int64)
-        arr_max = grid_coord.max(0)
-        key = ravel_hash_vec_numba(grid_coord, arr_min, arr_max)
-        
-        # 4. Sort by hash key
-        idx_sort = np.argsort(key, kind='mergesort')
-        key_sort = key[idx_sort]
-        
-        # 5. Get unique keys and counts
-        _, inverse, count = np.unique(key_sort, return_inverse=True, return_counts=True)
-        
-        # 6. Prepare cumsum for voxel boundaries
-        cumsum_counts = np.cumsum(np.insert(count, 0, 0))
-        
-        # 7. Shuffle points within each voxel for randomness (using numba)
-        if self.shuffle_points:
-            idx_sort = shuffle_within_voxels_numba(idx_sort, cumsum_counts, count)
-        
-        # 8. Test mode with max_loops control
-        max_count = count.max()
-        
-        # 计算实际的循环次数和每次采样数
-        if max_count <= self.max_loops:
-            # 正常情况：每次采1个点
-            num_loops = max_count
-            points_per_loop = 1
-        else:
-            # 极端情况：限制循环次数，每次采多个点
-            num_loops = self.max_loops
-            points_per_loop = int(np.ceil(max_count / self.max_loops))
-        
-        # 9. Sample using numba-accelerated function
-        data_part_list = sample_voxels_numba(
-            idx_sort, cumsum_counts, count, 
-            num_loops, self.max_loops, points_per_loop
-        )
-        
-        return data_part_list
-
-
-class LASProcessorToBinWithGridSample:
+class LASProcessorLogicalIndex:
     def __init__(self,
                  input_path: Union[str, Path],
                  output_dir: Union[str, Path] = None,
                  window_size: Tuple[float, float] = (50.0, 50.0),
-                 min_points: Optional[int] = 1000,
-                 max_points: Optional[int] = 5000,
                  overlap: bool = False,
-                 grid_size: Optional[float] = None,
-                 max_loops: int = 30,
-                 shuffle_points: bool = True,
+                 grid_size: float = 0.5,      # 仅用于生成逻辑索引，不进行物理降采样
+                 min_points: int = 1000,
+                 max_points: int = 5000,      # 通常不再需要强制切分，因为我们有完美的batch控制
                  ground_class: Optional[int] = 2):
-        """
-        Initialize LAS point cloud processor with grid sampling.
         
-        Args:
-            input_path: Path to LAS file or directory containing LAS files
-            output_dir: Directory to save processed files (default: same as input)
-            window_size: (x_size, y_size) for rectangular windows (in units of the LAS file)
-            min_points: Minimum points threshold for a valid segment (None to skip)
-            max_points: Maximum points threshold before further segmentation (None to skip)
-            overlap: Whether to use overlap mode (offset grid by half window size)
-            grid_size: Grid size for grid sampling (None to skip grid sampling)
-            max_loops: Maximum number of sampling iterations for grid sampling
-            shuffle_points: Whether to shuffle points within each voxel for randomness
-            ground_class: Classification value for ground points (default: 2, None to skip is_ground generation)
-        """
         self.input_path = Path(input_path)
         self.output_dir = Path(output_dir) if output_dir else self.input_path.parent
         self.window_size = window_size
+        self.overlap = overlap
+        # overlap_ratio = 0.5 if overlap else 0.0
+        self.grid_size = grid_size
         self.min_points = min_points
         self.max_points = max_points
-        self.overlap = overlap
-        self.grid_size = grid_size
-        self.max_loops = max_loops
-        self.shuffle_points = shuffle_points
         self.ground_class = ground_class
         
-        # Initialize grid sampler if grid_size is specified
-        self.grid_sampler = GridSampler(grid_size, max_loops, shuffle_points) if grid_size is not None else None
+        # 计算步长 (Stride)
+        # self.stride = (
+        #     window_size[0] * (1 - overlap_ratio),
+        #     window_size[1] * (1 - overlap_ratio)
+        # )
         
         if not self.output_dir.exists():
             self.output_dir.mkdir(parents=True)
             
         self.las_files = self._find_las_files()
-    
+
     def _find_las_files(self) -> List[Path]:
-        """Find all LAS files in the input path."""
-        if self.input_path.is_file() and self.input_path.suffix.lower() in ['.las', '.laz']:
+        """
+        查找输入路径下的所有 LAS/LAZ 文件
+        """
+        if self.input_path.is_file():
             return [self.input_path]
         elif self.input_path.is_dir():
-            return list(self.input_path.glob('*.las')) + list(self.input_path.glob('*.laz'))
+            return sorted(list(self.input_path.glob('*.las')) + list(self.input_path.glob('*.laz')))
         else:
-            raise ValueError(f"Input path {self.input_path} is not a valid LAS file or directory")
-    
-    def process_all_files(self, n_workers: int = None):
+            raise ValueError(f"Invalid path: {self.input_path}")
+
+    def process_all_files(self, n_workers=None):
         """
-        Process all discovered LAS files.
-        并行处理在单个LAS文件内部进行，而不是跨文件并行。
-        
-        Args:
-            n_workers: Number of parallel workers for segment processing (None = auto)
+        处理所有 LAS/LAZ 文件
         """
-        import time
-        import multiprocessing
-        
+
         if n_workers is None:
             n_workers = max(1, multiprocessing.cpu_count() - 1)
-        
+
         start_time = time.time()
-        
-        print("="*70)
-        print(f"Starting LAS to BIN/PKL conversion with Grid Sampling")
-        print("="*70)
-        print(f"Total files: {len(self.las_files)}")
-        print(f"Window size: {self.window_size}")
-        print(f"Min points: {self.min_points}")
-        print(f"Max points: {self.max_points}")
-        if self.grid_sampler:
-            print(f"Grid sampling: ✅ Enabled")
-            print(f"  - Grid size: {self.grid_size}")
-            print(f"  - Max loops: {self.max_loops}")
-            print(f"  - Shuffle points: {'✅ Yes' if self.shuffle_points else '❌ No'}")
-        else:
-            print(f"Grid sampling: ❌ Disabled")
-        print(f"Overlap mode: {'✅ Enabled' if self.overlap else '❌ Disabled'}")
-        if self.ground_class is not None:
-            print(f"Ground classification: {self.ground_class} → is_ground field")
-        else:
-            print(f"Ground classification: ❌ Disabled")
-        print(f"Parallel workers: {n_workers} (per file)")
-        print("-"*70)
+
+        # 美化的标题输出
+        print(f"\n{Colors.BOLD}{'═'*70}{Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.CYAN}  🚀 LAS 逻辑索引分块处理器 (Logical Index Tiling){Colors.RESET}")
+        print(f"{Colors.BOLD}{'═'*70}{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 总文件数: {Colors.GREEN}{len(self.las_files)}{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} CPU 核心: {Colors.GREEN}{n_workers}{Colors.RESET}")
+        grid_size_str = f"{self.grid_size}m" if self.grid_size is not None else "跳过体素化"
+        print(f"  {Colors.DIM}├─{Colors.RESET} 网格大小: {Colors.YELLOW}{grid_size_str}{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 窗口大小: {Colors.YELLOW}{self.window_size}m{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 重叠模式: {Colors.GREEN if self.overlap else Colors.DIM}{'是' if self.overlap else '否'}{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 点数范围: {Colors.YELLOW}{self.min_points} ~ {self.max_points or '无限制'}{Colors.RESET}")
+        print(f"  {Colors.DIM}└─{Colors.RESET} 地面类别: {Colors.YELLOW}{self.ground_class or '未指定'}{Colors.RESET}")
+        print(f"{Colors.BOLD}{'─'*70}{Colors.RESET}\n")
         
         # 顺序处理每个文件，但文件内部并行处理segments
-        for las_file in tqdm(self.las_files, desc="Processing files", unit="file",
-                            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'):
+        for idx, las_file in enumerate(self.las_files, 1):
             try:
-                self.process_file(las_file, n_workers=n_workers)
+                self.process_file(las_file, n_workers=n_workers, file_idx=idx, total_files=len(self.las_files))
             except Exception as e:
-                print(f"\n[ERROR] {las_file.name}: {e}")
+                print(f"\n{Colors.RED}[ERROR] {las_file.name}: {e}{Colors.RESET}")
                 import traceback
                 traceback.print_exc()
+
+        elapsed = time.time() - start_time
         
-        elapsed_time = time.time() - start_time
-        print("\n" + "="*70)
-        print(f"Conversion completed successfully!")
-        print(f"Total time: {elapsed_time:.2f}s ({elapsed_time/60:.2f}min)")
-        print(f"Average: {elapsed_time/len(self.las_files):.2f}s per file")
-        print("="*70)
-    
-    def process_file(self, las_file: Union[str, Path], n_workers: int = 4):
-        """
-        Process a single LAS file and save to bin+pkl format.
-        
-        Args:
-            las_file: Path to LAS file
-            n_workers: Number of parallel workers for segment processing
-        """
-        import time
-        las_file = Path(las_file)
-        
+        # 美化的完成输出
+        print(f"\n{Colors.BOLD}{'═'*70}{Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.GREEN}  ✅ 处理完成!{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} ⏱️  总耗时: {Colors.CYAN}{format_time(elapsed)}{Colors.RESET}")
+        print(f"  {Colors.DIM}└─{Colors.RESET} 📄 平均每文件: {Colors.CYAN}{format_time(elapsed/len(self.las_files))}{Colors.RESET}")
+        print(f"{Colors.BOLD}{'═'*70}{Colors.RESET}\n")
+
+    def process_file(self, las_file: Path, n_workers=None, file_idx=1, total_files=1):
+
+        print(f"{Colors.BOLD}{'─'*70}{Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.BLUE}  📄 [{file_idx}/{total_files}] {las_file.name}{Colors.RESET}")
+        print(f"{Colors.BOLD}{'─'*70}{Colors.RESET}")
         file_start = time.time()
-        print(f"\n{'='*70}")
-        print(f"📄 Processing: {las_file.name}")
-        print(f"{'='*70}")
-        
-        # 1. 读取LAS文件
+
+        # 1. 读取数据
         t0 = time.time()
         with laspy.open(las_file) as fh:
             las_data = fh.read()
         t1 = time.time()
-        print(f"  ✓ 读取LAS文件: {t1-t0:.2f}s ({len(las_data.points):,} 点)")
-        
-        # 2. 准备点云数据
+        print(f"  {Colors.DIM}├─{Colors.RESET} 📖 读取LAS: {Colors.GREEN}{format_time(t1-t0)}{Colors.RESET} → {Colors.CYAN}{format_number(len(las_data.points))}{Colors.RESET} 点")
+            
+        # 获取坐标 (laspy 默认返回 float64)
         t0 = time.time()
-        point_data = np.vstack((
-            las_data.x, 
-            las_data.y, 
-            las_data.z
-        )).transpose()
+        points = np.vstack((las_data.x, las_data.y, las_data.z)).transpose()
         t1 = time.time()
-        print(f"  ✓ 准备点云数据: {t1-t0:.2f}s")
         
-        # 3. 分割处理（这里会有详细子阶段输出）
+        # 2. 滑动窗口切块 (获取索引列表)
         t0 = time.time()
-        segments = self.segment_point_cloud(point_data, n_workers=n_workers)
+        result = self.segment_point_cloud(points, n_workers=n_workers)
+        segments_indices, seg1_count, seg2_count = result
         t1 = time.time()
-        print(f"  ✓ 总分割时间: {t1-t0:.2f}s → {len(segments)} segments")
         
-        # 4. 保存文件
+        # 显示分块信息
+        if self.overlap and seg1_count is not None:
+            print(f"  {Colors.DIM}├─{Colors.RESET} 🔲 分块处理: {Colors.GREEN}{format_time(t1-t0)}{Colors.RESET} → {Colors.CYAN}{len(segments_indices)}{Colors.RESET} 块 ({seg1_count} + {seg2_count})")
+        else:
+            print(f"  {Colors.DIM}├─{Colors.RESET} 🔲 分块处理: {Colors.GREEN}{format_time(t1-t0)}{Colors.RESET} → {Colors.CYAN}{len(segments_indices)}{Colors.RESET} 块")
+        
+        # 3. 处理并保存
         t0 = time.time()
-        self.save_segments_as_bin_pkl(las_file, las_data, segments)
+        self._save_bin_pkl(las_file, las_data, segments_indices)
         t1 = time.time()
-        print(f"  ✓ 保存文件: {t1-t0:.2f}s")
         
-        file_total = time.time() - file_start
-        print(f"  🎯 总计: {file_total:.2f}s")
-        print(f"{'='*70}")
-    
+        # 总耗时
+        total_time = time.time() - file_start
+        print(f"  {Colors.DIM}└─{Colors.RESET} ⏱️  文件总耗时: {Colors.BOLD}{Colors.GREEN}{format_time(total_time)}{Colors.RESET}")
+
     def segment_point_cloud(self, points: np.ndarray, n_workers: int = 4) -> List[np.ndarray]:
         """
         Segment point cloud into tiles based on window size.
@@ -422,37 +233,28 @@ class LASProcessorToBinWithGridSample:
         """
         import time
         
-        print(f"  📦 开始分割 ({n_workers} workers)...")
-        
         if not self.overlap:
             # 正常模式：单次网格分割
             t0 = time.time()
-            segments = self._grid_segmentation(points, offset_x=0, offset_y=0, n_workers=n_workers)
-            t1 = time.time()
-            print(f"     单次网格分割: {t1-t0:.2f}s")
-            return segments
+            segments = self._grid_segmentation(points, offset_x=0, offset_y=0, n_workers=n_workers, show_details=False)
+            return segments, None, None
         else:
             # Overlap模式：两次网格分割（偏移半个窗口）
             x_size, y_size = self.window_size
             
             # 第一次分割：正常网格
             t0 = time.time()
-            segments1 = self._grid_segmentation(points, offset_x=0, offset_y=0, n_workers=n_workers)
-            t1 = time.time()
-            print(f"     第1次网格分割: {t1-t0:.2f}s → {len(segments1)} segments")
+            segments1 = self._grid_segmentation(points, offset_x=0, offset_y=0, n_workers=n_workers, show_details=False)
             
             # 第二次分割：偏移半个窗口
-            t0 = time.time()
-            segments2 = self._grid_segmentation(points, offset_x=x_size/2, offset_y=y_size/2, n_workers=n_workers)
-            t1 = time.time()
-            print(f"     第2次网格分割: {t1-t0:.2f}s → {len(segments2)} segments")
+            segments2 = self._grid_segmentation(points, offset_x=x_size/2, offset_y=y_size/2, n_workers=n_workers, show_details=False)
             
             # 合并两次分割结果
             all_segments = segments1 + segments2
             
-            return all_segments
-    
-    def _grid_segmentation(self, points: np.ndarray, offset_x: float = 0, offset_y: float = 0, n_workers: int = 4) -> List[np.ndarray]:
+            return all_segments, len(segments1), len(segments2)
+        
+    def _grid_segmentation(self, points: np.ndarray, offset_x: float = 0, offset_y: float = 0, n_workers: int = 4, show_details: bool = False) -> List[np.ndarray]:
         """
         Perform grid-based segmentation with optional offset.
         
@@ -461,6 +263,7 @@ class LASProcessorToBinWithGridSample:
             offset_x: X offset for grid origin
             offset_y: Y offset for grid origin
             n_workers: Number of parallel workers
+            show_details: Whether to print detailed progress
             
         Returns:
             List of segment indices
@@ -497,67 +300,17 @@ class LASProcessorToBinWithGridSample:
         # np.split 会返回列表
         segments = np.split(sort_idx, split_indices[1:])
         
-        # 过滤空 segment (np.unique 保证了 unique_ids 对应存在的 segments，通常不需要过滤，但 split 会产生第一个空如果索引0有值)
-        # np.unique return_index 返回的是每个唯一值第一次出现的索引
-        # 实际 segments 应该是 [split_indices[i]:split_indices[i+1]]
-        
-        t1 = time.time()
-        print(f"       - 窗口分组: {t1-t0:.3f}s → {len(segments)} 窗口")
-        
         # 2. Min阈值处理（优先处理，合并边界上点少的无效窗口）
         if self.min_points is not None:
-            t0 = time.time()
             before_count = len(segments)
             segments = self.apply_min_threshold(points, segments, min_threshold=self.min_points)
-            t1 = time.time()
-            print(f"       - Min阈值处理: {t1-t0:.3f}s ({before_count} → {len(segments)} segments)")
         
-        # 3. Grid Sampling处理（在Min和Max之间）
-        if self.grid_sampler is not None:
-            t0 = time.time()
-            before_count = len(segments)
-            total_points_before = sum(len(seg) for seg in segments)
-            segments = self.apply_grid_sampling(points, segments)
-            total_points_after = sum(len(seg) for seg in segments)
-            t1 = time.time()
-            print(f"       - Grid采样处理: {t1-t0:.3f}s ({before_count} → {len(segments)} segments, "
-                  f"{total_points_before:,} → {total_points_after:,} points)")
-        
-        # 4. Max阈值处理（最后处理）
+        # 3. Max阈值处理（最后处理）
         if self.max_points is not None:
-            t0 = time.time()
             before_count = len(segments)
             segments = self.apply_max_threshold(points, segments, n_workers=n_workers)
-            t1 = time.time()
-            print(f"       - Max阈值处理: {t1-t0:.3f}s ({before_count} → {len(segments)} segments)")
             
         return segments
-    
-    def apply_grid_sampling(self, points: np.ndarray, segments: List[np.ndarray]) -> List[np.ndarray]:
-        """
-        Apply grid sampling to each segment.
-        
-        Args:
-            points: Point cloud array (N, 3)
-            segments: List of segment indices
-            
-        Returns:
-            List of sampled segment indices (expanded due to multiple sampling iterations)
-        """
-        sampled_segments = []
-        
-        for segment in segments:
-            segment_points = points[segment]
-            
-            # Perform grid sampling (returns list of index arrays)
-            sampled_indices_list = self.grid_sampler.sample(segment_points)
-            
-            # Convert local indices to global indices and add to result
-            for local_indices in sampled_indices_list:
-                global_indices = segment[local_indices]
-                sampled_segments.append(global_indices)
-        
-        return sampled_segments
     
     def apply_max_threshold(self, points: np.ndarray, segments: List[np.ndarray], n_workers: int = 4) -> List[np.ndarray]:
         """
@@ -608,6 +361,107 @@ class LASProcessorToBinWithGridSample:
         
         return result_segments
     
+    def _process_single_segment(self, args) -> dict:
+        """
+        处理单个 segment 的体素化（用于并行处理）
+        """
+        i, indices, lx, ly, lz, l_class, bin_name, pkl_name = args
+        
+        # 1. 提取当前块坐标 (Float64)
+        seg_points = np.column_stack((lx[indices], ly[indices], lz[indices]))
+        
+        # 2. 局部坐标归一化
+        local_min = seg_points.min(0)
+        local_points = (seg_points - local_min).astype(np.float64)
+        
+        # 3. 体素化处理 (如果 grid_size 为 None 则跳过)
+        if self.grid_size is not None:
+            # 计算 Grid Hash (使用纯 NumPy 向量化，避免 Numba JIT 开销)
+            grid_coord = np.floor(local_points / self.grid_size).astype(np.int64)
+            
+            # 确保非负且紧凑
+            if len(grid_coord) > 0:
+                grid_min = grid_coord.min(0)
+                grid_coord -= grid_min
+                arr_max = grid_coord.max(0)
+                
+                # 向量化 ravel hash (Fortran style)
+                multipliers = np.cumprod(np.concatenate([[1], arr_max[1:] + 1])).astype(np.uint64)
+                keys = (grid_coord.astype(np.uint64) * multipliers).sum(axis=1)
+            else:
+                keys = np.zeros(0, dtype=np.uint64)
+            
+            # 生成逻辑排序索引
+            sort_ptr = np.argsort(keys, kind='mergesort').astype(np.int32)
+            keys_sorted = keys[sort_ptr]
+            
+            # 计算体素统计
+            _, voxel_counts = np.unique(keys_sorted, return_counts=True)
+        else:
+            # 跳过体素化：保持原始顺序
+            sort_ptr = np.arange(len(indices), dtype=np.int32)
+            voxel_counts = np.array([len(indices)], dtype=np.int64)  # 单个"体素"包含所有点
+        
+        # 4. 统计类别分布
+        label_counts = {}
+        unique_labels = []
+        if l_class is not None:
+            seg_labels = l_class[indices]
+            unique_labels, u_counts = np.unique(seg_labels, return_counts=True)
+            label_counts = {int(k): int(v) for k, v in zip(unique_labels, u_counts)}
+        
+        # 5. 计算边界框
+        bounds = {
+            'x_min': float(seg_points[:, 0].min()),
+            'x_max': float(seg_points[:, 0].max()),
+            'y_min': float(seg_points[:, 1].min()),
+            'y_max': float(seg_points[:, 1].max()),
+            'z_min': float(seg_points[:, 2].min()),
+            'z_max': float(seg_points[:, 2].max())
+        }
+
+        return {
+            'segment_id': i,
+            'indices': indices,
+            'num_points': len(indices),
+            'sort_idx': sort_ptr,
+            'voxel_counts': voxel_counts,
+            'num_voxels': len(voxel_counts),
+            'max_voxel_density': voxel_counts.max() if len(voxel_counts) > 0 else 0,
+            'local_min': local_min,
+            'label_counts': label_counts,
+            'unique_labels': unique_labels,
+            'bounds': bounds,
+            'bin_path': bin_name,
+            'pkl_path': pkl_name
+        }
+
+    def _process_segments_parallel(self, segments, lx, ly, lz, l_class, bin_path, pkl_path, n_workers=None):
+        """
+        并行处理所有 segments 的体素化
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        
+        if n_workers is None:
+            n_workers = min(8, max(1, multiprocessing.cpu_count() - 1))
+        
+        bin_name = str(bin_path.name)
+        pkl_name = str(pkl_path.name)
+        
+        # 准备参数
+        args_list = [
+            (i, indices, lx, ly, lz, l_class, bin_name, pkl_name)
+            for i, indices in enumerate(segments)
+        ]
+        
+        # 使用线程池并行处理
+        segments_info = []
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            results = list(executor.map(self._process_single_segment, args_list))
+            segments_info = sorted(results, key=lambda x: x['segment_id'])
+        
+        return segments_info
+
     def apply_min_threshold(self, points: np.ndarray, segments: List[np.ndarray], 
                            min_threshold: Optional[int] = None) -> List[np.ndarray]:
         """
@@ -654,110 +508,101 @@ class LASProcessorToBinWithGridSample:
                 segments[small_idx] = np.array([], dtype=int)
         
         return [segment for segment in segments if len(segment) > 0]
-    
-    def save_segments_as_bin_pkl(self, las_file: Path, las_data: laspy.LasData, segments: List[np.ndarray]):
-        """
-        Save segmented point clouds to bin+pkl format.
-        
-        Args:
-            las_file: Original LAS file path
-            las_data: Original LAS data
-            segments: List of index arrays for segments
-        """
-        import time
-        
+
+
+    def _save_bin_pkl(self, las_file, las_data, segments):
         base_name = las_file.stem
-        
-        # 准备保存所有点云数据到一个bin文件
         bin_path = self.output_dir / f"{base_name}.bin"
         pkl_path = self.output_dir / f"{base_name}.pkl"
         
-        print(f"  💾 保存到 bin+pkl...")
-        
-        # 1. 收集字段
+        print(f"  {Colors.DIM}├─{Colors.RESET} 💾 保存文件...")
         t0 = time.time()
+
+        # --- A. 收集字段 ---
         
-        # 只保存真正有意义数据的字段
-        # 必须保存的核心字段
+        # 1. 核心字段: 强制 float64 保证精度
         core_fields = ['X', 'Y', 'Z']
+        dtype_list = [('X', np.float64), ('Y', np.float64), ('Z', np.float64)]
         
-        # 可选但常用的字段（需要检查是否存在）
-        optional_fields = ['intensity', 'return_number', 'number_of_returns', 
-                          'classification', 'scan_angle_rank', 'user_data', 
-                          'point_source_id', 'gps_time', 
-                          'red', 'green', 'blue', 'nir',
-                          'edge_of_flight_line']
+        # 初始数据字典 (laspy.x 已经是 float64)
+        data_dict = {
+            'X': np.array(las_data.x, dtype=np.float64), 
+            'Y': np.array(las_data.y, dtype=np.float64), 
+            'Z': np.array(las_data.z, dtype=np.float64)
+        }
         
-        # 构建字段列表：只保存实际存在且有数据的字段
-        fields_to_save = []
-        dtype_list = []
-        data_dict = {}
+        # 2. 扩展的可选字段列表
+        optional_fields = [
+            'intensity', 'return_number', 'number_of_returns', 
+            'classification', 'scan_angle_rank', 'user_data', 
+            'point_source_id', 'gps_time', 
+            'red', 'green', 'blue', 'nir', 'edge_of_flight_line'
+        ]
         
-        # 保存核心字段（必须有）
-        for field in core_fields:
-            field_lower = field.lower()
-            if hasattr(las_data, field_lower):
-                data = getattr(las_data, field_lower)
-                fields_to_save.append(field)
-                data_dict[field] = data
-                dtype_list.append((field, data.dtype))
-        
-        # 保存可选字段（只有存在时才保存）
+        # 3. 动态收集存在的字段
+        # 注意: laspy 属性是小写的，但我们保存的 key 用标准名(通常大写或驼峰，但这里保持小写属性名对应的原始名)
+        # 为了兼容性，除了XYZ，其他字段我们使用小写或 laspy 属性名
         has_classification = False
+        fields_to_save = list(core_fields) # 先加入核心字段
+        
         for field in optional_fields:
+            # laspy 属性通常是小写的
             field_lower = field.lower()
+            
             if hasattr(las_data, field_lower):
-                data = getattr(las_data, field_lower)
+                arr = getattr(las_data, field_lower)
+                # 使用字段原名作为 key (如 'red', 'intensity')
+                # 注意：XYZ 我们用大写，其他通常用小写
+                # 这里我们统一使用 field (列表中的名字) 作为 key
+                data_dict[field] = arr
+                dtype_list.append((field, arr.dtype))
                 fields_to_save.append(field)
-                data_dict[field] = data
-                dtype_list.append((field, data.dtype))
+                
                 if field_lower == 'classification':
                     has_classification = True
         
-        # 如果没有classification，添加默认值0（这是唯一添加默认值的字段）
+        # 4. 兜底处理：如果没有 classification，补全为 0
         if not has_classification:
-            fields_to_save.append('classification')
+            print(f"  {Colors.DIM}│{Colors.RESET}  {Colors.YELLOW}⚠️  无 classification 字段，补全为 0{Colors.RESET}")
             data_dict['classification'] = np.zeros(len(las_data.points), dtype=np.uint8)
             dtype_list.append(('classification', np.uint8))
-        
-        # 生成 is_ground 字段（基于 classification）
-        if self.ground_class is not None and has_classification:
-            is_ground = (las_data.classification == self.ground_class).astype(np.uint8)
-            fields_to_save.append('is_ground')
+            fields_to_save.append('classification')
+            
+        # 5. 🔥 生成 is_ground 字段 🔥
+        # 基于 classification 生成，避免 Dataset 重复计算
+        if self.ground_class is not None:
+            # 确保使用刚才（可能补全的）classification 数据
+            cls_data = data_dict['classification']
+            is_ground = (cls_data == self.ground_class).astype(np.uint8)
+            
             data_dict['is_ground'] = is_ground
             dtype_list.append(('is_ground', np.uint8))
-        
-        # 创建结构化数组
-        structured_array = np.zeros(len(las_data.points), dtype=dtype_list)
+            fields_to_save.append('is_ground')
+
+        # 6. 创建结构化数组并保存
+        struct_arr = np.zeros(len(las_data.points), dtype=dtype_list)
         for field in fields_to_save:
-            structured_array[field] = data_dict[field]
+            struct_arr[field] = data_dict[field]
+            
+        struct_arr.tofile(bin_path)
         
         t1 = time.time()
-        print(f"     - 收集字段: {t1-t0:.3f}s ({len(fields_to_save)} 个字段： {fields_to_save})")
-        
-        # 2. 保存为bin文件
+        bin_size = bin_path.stat().st_size
+        print(f"  {Colors.DIM}│{Colors.RESET}  📁 BIN: {Colors.GREEN}{format_time(t1-t0)}{Colors.RESET} → {Colors.CYAN}{format_size(bin_size)}{Colors.RESET}")
+
+        # --- B. 生成 PKL (逻辑索引元数据 & 关键头文件信息) ---
         t0 = time.time()
-        structured_array.tofile(bin_path)
-        t1 = time.time()
-        bin_size_mb = bin_path.stat().st_size / (1024**2)
-        print(f"     - 写入bin: {t1-t0:.3f}s ({bin_size_mb:.1f} MB)")
         
-        # 准备pkl文件的元数据
-        metadata = {
-            'las_file': las_file.name,
-            'num_points': len(las_data.points),
-            'num_segments': len(segments),
-            'fields': fields_to_save,
-            'dtype': dtype_list,
-            'window_size': self.window_size,
-            'min_points': self.min_points,
-            'max_points': self.max_points,
-            'overlap': self.overlap,
-            'grid_size': self.grid_size,
-            'max_loops': self.max_loops if self.grid_size else None,
-            'shuffle_points': self.shuffle_points if self.grid_size else None,
-        }
+        # 预取坐标以加速循环 (引用上面已经转好的 float64 数组)
+        lx, ly, lz = data_dict['X'], data_dict['Y'], data_dict['Z']
+        l_class = data_dict.get('classification', None)
         
+        # 🚀 并行处理所有 segments 的体素化
+        segments_info = self._process_segments_parallel(
+            segments, lx, ly, lz, l_class, bin_path, pkl_path
+        )
+            
+        # 8. 🔥 收集完整的 LAS Header 和 VLRs 信息 🔥
         # 收集完整的LAS头文件信息
         header_info = {
             'version': f"{las_data.header.version.major}.{las_data.header.version.minor}",
@@ -817,222 +662,47 @@ class LASProcessorToBinWithGridSample:
             except:
                 header_info['crs'] = None
         
-        metadata['header_info'] = header_info
+        # 9. 统计全局类别分布 (Global Label Counts)
+        global_label_counts = {}
+        if 'classification' in data_dict:
+            unique_labels, u_counts = np.unique(data_dict['classification'], return_counts=True)
+            global_label_counts = {int(k): int(v) for k, v in zip(unique_labels, u_counts)}
+
+        # 保存 PKL
+        metadata = {
+            'las_file': las_file.name,
+            'num_points': len(las_data.points),
+            'num_segments': len(segments_info),
+            'fields': fields_to_save,
+            'dtype': dtype_list,
+            'window_size': self.window_size,
+            'overlap': self.overlap,
+            'min_points': self.min_points,
+            'max_points': self.max_points,
+            'segments': segments_info,
+            'grid_size': self.grid_size, # 记录生成索引时的 grid size
+            'header_info': header_info,  # 🔥 补回头文件信息
+            'label_counts': global_label_counts # 🔥 补回全局类别统计
+        }
         
-        # 统计整个文件的类别分布
-        if has_classification:
-            unique_labels, counts = np.unique(las_data.classification, return_counts=True)
-            label_counts = {int(label): int(count) for label, count in zip(unique_labels, counts)}
-        else:
-            label_counts = {0: len(las_data.points)}
-        metadata['label_counts'] = label_counts
-        
-        t1 = time.time()
-        print(f"     - 准备metadata: {t1-t0:.3f}s")
-        
-        # 3. 收集每个分块的信息
-        t0 = time.time()
-        segments_info = []
-        
-        # 优化：预先获取 numpy 数组，避免在循环中反复访问 las_data 属性（可能触发 getter 开销）
-        # 注意：使用 points 数组（如果之前已经有了）或者从 las_data 提取
-        # 这里直接使用 las_data 的数组引用
-        lx, ly, lz = las_data.x, las_data.y, las_data.z
-        
-        # 获取分类数组（如果存在）
-        l_class = None
-        if has_classification:
-            l_class = las_data.classification
-        
-        for i, segment_indices in enumerate(segments):
-            segment_info = {
-                'segment_id': i,
-                'indices': segment_indices,
-                'num_points': len(segment_indices),
-                'bin_file': base_name,
-                'bin_path': str(bin_path),
-                'pkl_path': str(pkl_path),
-            }
-            
-            # 统计该片段的类别信息
-            if l_class is not None:
-                seg_class = l_class[segment_indices]
-                unique_labels, counts = np.unique(seg_class, return_counts=True)
-                segment_info['unique_labels'] = unique_labels
-                segment_info['label_counts'] = {int(k): int(v) for k, v in zip(unique_labels, counts)}
-            
-            # 优化：提取当前 segment 的坐标子集，只做一次切片
-            seg_x = lx[segment_indices]
-            seg_y = ly[segment_indices]
-            seg_z = lz[segment_indices]
-            
-            # 计算边界（使用子集计算，快得多）
-            segment_info['x_min'] = float(np.min(seg_x))
-            segment_info['x_max'] = float(np.max(seg_x))
-            segment_info['y_min'] = float(np.min(seg_y))
-            segment_info['y_max'] = float(np.max(seg_y))
-            segment_info['z_min'] = float(np.min(seg_z))
-            segment_info['z_max'] = float(np.max(seg_z))
-            
-            segments_info.append(segment_info)
-        
-        metadata['segments'] = segments_info
-        
-        t1 = time.time()
-        print(f"     - 收集segments信息: {t1-t0:.3f}s ({len(segments)} segments)")
-        
-        # 4. 保存pkl文件
-        t0 = time.time()
         with open(pkl_path, 'wb') as f:
-            pickle.dump(metadata, f, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(metadata, f)
+        
         t1 = time.time()
-        pkl_size_mb = pkl_path.stat().st_size / (1024**2)
-        print(f"     - 写入pkl: {t1-t0:.3f}s ({pkl_size_mb:.1f} MB)")
-
-
-def process_las_files_to_bin_with_gridsample(input_path, output_dir=None, window_size=(50.0, 50.0), 
-                                              min_points=None, max_points=None,
-                                              overlap=False, grid_size=None,
-                                              max_loops=30, shuffle_points=True,
-                                              ground_class=2, n_workers=None):
-    """
-    Process LAS files with grid sampling and save to bin+pkl format.
-    并行处理在单个LAS文件内部进行（处理segments），而不是跨文件并行。
-    
-    Args:
-        input_path: Path to LAS file or directory containing LAS files
-        output_dir: Directory to save processed files (default: same as input)
-        window_size: (x_size, y_size) for rectangular windows
-        min_points: Minimum points threshold for a valid segment
-        max_points: Maximum points threshold before further segmentation
-        overlap: Whether to use overlap mode (offset grid by half window size)
-        grid_size: Grid size for grid sampling (None to skip grid sampling)
-        max_loops: Maximum number of sampling iterations (to avoid extreme cases)
-        shuffle_points: Whether to shuffle points within each voxel for randomness
-        ground_class: Classification value for ground points (default: 2, None to skip is_ground generation)
-        n_workers: Number of parallel workers for segment processing (None = auto, uses CPU count - 1)
-    """
-    processor = LASProcessorToBinWithGridSample(
-        input_path=input_path,
-        output_dir=output_dir,
-        window_size=window_size,
-        min_points=min_points,
-        max_points=max_points,
-        overlap=overlap,
-        grid_size=grid_size,
-        max_loops=max_loops,
-        shuffle_points=shuffle_points,
-        ground_class=ground_class
-    )
-    processor.process_all_files(n_workers=n_workers)
-
-
-# 提供一个辅助函数用于加载数据
-def load_segment_from_bin(bin_path: Union[str, Path], 
-                          pkl_path: Union[str, Path], 
-                          segment_id: int) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """
-    使用np.memmap从bin文件中加载指定分块的数据。
-    
-    Args:
-        bin_path: bin文件路径
-        pkl_path: pkl文件路径
-        segment_id: 要加载的分块ID
-        
-    Returns:
-        (segment_data, segment_info): 分块的点云数据和元数据
-    """
-    bin_path = Path(bin_path)
-    pkl_path = Path(pkl_path)
-    
-    # 加载元数据
-    with open(pkl_path, 'rb') as f:
-        metadata = pickle.load(f)
-    
-    # 获取分块信息
-    segment_info = metadata['segments'][segment_id]
-    indices = segment_info['indices']
-    
-    # 使用memmap加载数据
-    dtype = np.dtype(metadata['dtype'])
-    mmap_data = np.memmap(bin_path, dtype=dtype, mode='r')
-    
-    # 读取指定分块的数据
-    segment_data = mmap_data[indices]
-    
-    return segment_data, segment_info
-
-
-def load_all_segments_info(pkl_path: Union[str, Path]) -> List[Dict[str, Any]]:
-    """
-    加载所有分块的元数据信息（不加载实际点云数据）。
-    
-    Args:
-        pkl_path: pkl文件路径
-        
-    Returns:
-        所有分块的元数据列表
-    """
-    pkl_path = Path(pkl_path)
-    
-    with open(pkl_path, 'rb') as f:
-        metadata = pickle.load(f)
-    
-    return metadata['segments']
-
+        pkl_size = pkl_path.stat().st_size
+        print(f"  {Colors.DIM}│{Colors.RESET}  📦 PKL: {Colors.GREEN}{format_time(t1-t0)}{Colors.RESET} → {Colors.CYAN}{format_size(pkl_size)}{Colors.RESET} ({len(segments_info)} 块)")
+        print(f"  {Colors.DIM}│{Colors.RESET}  📋 字段: {Colors.CYAN}{', '.join(fields_to_save)}{Colors.RESET}")
 
 if __name__ == "__main__":
-    # 示例：处理LAS文件（带Grid Sampling）
-    input_path = r"E:\data\DALES\dales_las\test"
-    output_dir = r"E:\data\DALES\dales_las\bin\test"
-    window_size = (50.0, 50.0)
-    min_points = 4096 * 5
-    max_points = None
-    overlap = False
-    grid_size = 0.5  # 🔥 设置grid size启用grid sampling
-    max_loops = 10  # 🔥 grid size开启时的最大采样循环次数（避免极端情况）
-    shuffle_points = True  # 🔥 打乱体素内点顺序（提高随机性）
-    max_workers = 8  # 自动检测CPU核心数
-    ground_class = None  # 🔥 地面点的classification值（None则不生成is_ground字段）
-    
-    # 处理文件（并行处理在单个LAS文件内部进行）
-    process_las_files_to_bin_with_gridsample(
-        input_path=input_path,
-        output_dir=output_dir,
-        window_size=window_size,
-        min_points=min_points,
-        max_points=max_points,
-        overlap=overlap,
-        grid_size=grid_size,  # 🔥 设置grid_size启用grid sampling（None则跳过）
-        max_loops=max_loops,  # 🔥 最大循环次数（当体素内点>max_loops时，每次采样多个点）
-        shuffle_points=shuffle_points,  # 🔥 是否打乱体素内点顺序
-        ground_class=ground_class,  # 🔥 地面点classification值（2是LAS标准，None则不生成is_ground）
-        n_workers=max_workers  # 🔥 并行worker数（None=自动，每个文件内部并行处理segments）
+    # 示例用法
+    processor = LASProcessorLogicalIndex(
+        input_path=r"E:\data\DALES\dales_las\test",
+        output_dir=r"E:\data\DALES\dales_las\bin_logical\test",
+        window_size=(50.0, 50.0),
+        overlap=False, 
+        grid_size=0.5,     # 统一 Grid Size
+        min_points=5000,
+        max_points=None,
+        ground_class=None
     )
-    
-    # 示例：如何加载数据
-    # print("\n" + "="*50)
-    # print("示例：如何加载分块数据")
-    # print("="*50)
-    
-    # bin_file = Path(output_dir) / "5080_54400.bin"
-    # pkl_file = Path(output_dir) / "5080_54400.pkl"
-    
-    # if bin_file.exists() and pkl_file.exists():
-    #     # 加载所有分块信息
-    #     all_segments = load_all_segments_info(pkl_file)
-    #     print(f"\n总共有 {len(all_segments)} 个分块")
-        
-    #     # 加载第一个分块的数据
-    #     if len(all_segments) > 0:
-    #         segment_data, segment_info = load_segment_from_bin(bin_file, pkl_file, 0)
-    #         print(f"\n第一个分块信息:")
-    #         print(f"  - 点数: {segment_info['num_points']}")
-    #         print(f"  - 类别: {segment_info['unique_labels']}")
-    #         print(f"  - 类别分布: {segment_info['label_counts']}")
-    #         print(f"\n点云数据shape: {segment_data.shape}")
-    #         print(f"可用字段: {segment_data.dtype.names}")
-    #         print(f"\n前5个点的xyz坐标:")
-    #         # 字段名是大写的 X, Y, Z
-    #         for i in range(min(5, len(segment_data))):
-    #             print(f"  Point {i}: X={segment_data['X'][i]:.2f}, Y={segment_data['Y'][i]:.2f}, Z={segment_data['Z'][i]:.2f}, class={segment_data['classification'][i]}")
+    processor.process_all_files()

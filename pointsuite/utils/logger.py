@@ -2,6 +2,85 @@ import sys
 import os
 import datetime
 
+
+# ============================================================================
+# ANSI Colors (终端颜色输出)
+# ============================================================================
+
+class Colors:
+    """ANSI 颜色代码"""
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    RESET = '\033[0m'
+
+
+# ============================================================================
+# 美化输出函数
+# ============================================================================
+
+def print_header(title: str, emoji: str = "🚀"):
+    """打印美化的标题"""
+    print()
+    print(f"{Colors.BOLD}{'═' * 70}{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.CYAN}  {emoji} {title}{Colors.RESET}")
+    print(f"{Colors.BOLD}{'═' * 70}{Colors.RESET}")
+
+
+def print_section(title: str):
+    """打印章节标题"""
+    print(f"\n{Colors.BOLD}{Colors.BLUE}{'─' * 50}{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.BLUE}  {title}{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.BLUE}{'─' * 50}{Colors.RESET}")
+
+
+def print_config(configs: dict, title: str = "配置"):
+    """打印配置信息（字典）"""
+    print_section(title)
+    max_key_len = max(len(str(k)) for k in configs.keys()) if configs else 0
+    for key, value in configs.items():
+        print(f"  {Colors.DIM}├─{Colors.RESET} {key:<{max_key_len}}: {Colors.GREEN}{value}{Colors.RESET}")
+
+
+def format_size(size_bytes: float) -> str:
+    """格式化文件大小"""
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if abs(size_bytes) < 1024.0:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024.0
+    return f"{size_bytes:.1f} PB"
+
+
+def format_time(seconds: float) -> str:
+    """格式化时间"""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    elif seconds < 3600:
+        return f"{seconds/60:.1f}min"
+    else:
+        return f"{seconds/3600:.1f}h"
+
+
+def format_number(n: int) -> str:
+    """格式化数字 (K/M/B)"""
+    if n >= 1_000_000_000:
+        return f"{n/1_000_000_000:.1f}B"
+    elif n >= 1_000_000:
+        return f"{n/1_000_000:.1f}M"
+    elif n >= 1_000:
+        return f"{n/1_000:.0f}K"
+    return str(n)
+
+
+# ============================================================================
+# Dual Logger (stdout + file)
+# ============================================================================
+
 class DualLogger:
     """
     A logger that writes to both stdout/stderr and a file.

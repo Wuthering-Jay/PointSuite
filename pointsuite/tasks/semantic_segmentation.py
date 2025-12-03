@@ -1,8 +1,29 @@
 import torch
 import torch.nn as nn
-from typing import Dict, Any
+import numpy as np
+from typing import Dict, Any, List, Optional
 
 from .base_task import BaseTask
+
+
+# 辅助函数：计算字符串的显示宽度（中文字符占 2 个宽度）
+def _display_width(s: str) -> int:
+    """计算字符串的显示宽度（中文字符占 2 个宽度）"""
+    width = 0
+    for c in s:
+        if '\u4e00' <= c <= '\u9fff':  # CJK 统一汉字
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def _pad_to_width(s: str, target_width: int) -> str:
+    """将字符串填充到指定显示宽度"""
+    current_width = _display_width(s)
+    padding = target_width - current_width
+    return s + ' ' * max(0, padding)
+
 
 class SemanticSegmentationTask(BaseTask):
     """
@@ -12,6 +33,7 @@ class SemanticSegmentationTask(BaseTask):
     1. 一个 `head` (分割头)。
     2. 修改了 `forward` 逻辑，以连接 backbone 和 head。
     3. 修改了 `predict_step` 以输出最终的 argmax 预测。
+    4. 追踪最佳 mIoU 并打印详细的每类指标。
     """
     
     def __init__(self,
@@ -33,6 +55,10 @@ class SemanticSegmentationTask(BaseTask):
             **kwargs: 传递给 BaseTask 的参数。
         """
         super().__init__(**kwargs)
+        
+        # 追踪最佳 mIoU（语义分割特定）
+        self.best_miou = 0.0
+        self.best_miou_epoch = -1
         
         # 🔥 关键修改：保存 hyperparameters
         # 如果使用 model_config，我们忽略 backbone 和 head 对象，避免重复保存和警告
@@ -178,3 +204,191 @@ class SemanticSegmentationTask(BaseTask):
             results["coord"] = batch["coord"].cpu()
             
         return results
+    
+    def _print_validation_metrics(self, print_metrics: Dict[str, Any]):
+        """
+        打印语义分割的详细验证指标，包括每类的 IoU、Precision、Recall、F1
+        
+        Args:
+            print_metrics: 包含所有计算出的指标的字典
+        """
+        # 检查是否有 mIoU 信息
+        miou_key = 'mean_iou'
+        if miou_key not in print_metrics:
+            # 回退到基类的简单打印
+            super()._print_validation_metrics(print_metrics)
+            return
+        
+        try:
+            current_miou = float(print_metrics[miou_key])
+            
+            # 更新最佳 mIoU
+            if current_miou > self.best_miou:
+                self.best_miou = current_miou
+                self.best_miou_epoch = self.current_epoch
+            
+            # 获取其他指标
+            overall_acc = print_metrics.get('overall_accuracy', None)
+            
+            # 准备每类指标
+            per_class_iou = print_metrics.get('iou_per_class', print_metrics.get('per_class_iou', None))
+            per_class_precision = print_metrics.get('precision_per_class', print_metrics.get('per_class_precision', None))
+            per_class_recall = print_metrics.get('recall_per_class', print_metrics.get('per_class_recall', None))
+            per_class_f1 = print_metrics.get('f1_per_class', print_metrics.get('per_class_f1', None))
+            
+            # 如果没有直接提供每类指标，尝试从 MeanIoU metric 对象中获取 (兼容旧代码)
+            if per_class_iou is None and 'mean_iou' in self.val_metrics:
+                metric = self.val_metrics['mean_iou']
+                if hasattr(metric, 'confusion_matrix'):
+                    confmat = metric.confusion_matrix.cpu().numpy()
+                    intersection = np.diag(confmat)
+                    union = confmat.sum(1) + confmat.sum(0) - np.diag(confmat)
+                    per_class_iou = intersection / (union + 1e-10)
+                    per_class_precision = intersection / (confmat.sum(0) + 1e-10)
+                    per_class_recall = intersection / (confmat.sum(1) + 1e-10)
+                    per_class_f1 = 2 * per_class_precision * per_class_recall / (per_class_precision + per_class_recall + 1e-10)
+
+            # 输出标题和总体指标 (epoch 从 1 开始显示)
+            display_epoch = self.current_epoch + 1
+            print(f"\n{'='*100}")
+            print(f"Validation Epoch {display_epoch} - Metrics")
+            print(f"{'='*100}")
+            if overall_acc is not None:
+                print(f"Overall Accuracy: {overall_acc:.4f} ({overall_acc*100:.2f}%)")
+            print(f"Mean IoU (current): {current_miou:.4f}")
+            print(f"Mean IoU (best)   : {self.best_miou:.4f} (Epoch {self.best_miou_epoch + 1})")
+            if current_miou > self.best_miou - 1e-6:  # 当前是最佳
+                print(f"🎉 New best mIoU achieved!")
+            print(f"{'='*100}")
+            
+            # 输出每个类别的详细指标
+            if per_class_iou is not None:
+                self._print_per_class_metrics(
+                    per_class_iou, per_class_precision, per_class_recall, per_class_f1,
+                    print_metrics, current_miou
+                )
+            print(f"{'='*100}\n")
+        except Exception as e:
+            print(f"Warning: Could not print detailed metrics: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _print_test_metrics(self, print_metrics: Dict[str, Any]):
+        """
+        打印语义分割的详细测试指标
+        
+        Args:
+            print_metrics: 包含所有计算出的指标的字典
+        """
+        # 检查是否有 mIoU 信息
+        miou_key = 'mean_iou'
+        if miou_key not in print_metrics:
+            # 回退到基类的简单打印
+            super()._print_test_metrics(print_metrics)
+            return
+        
+        try:
+            current_miou = float(print_metrics[miou_key])
+            overall_acc = print_metrics.get('overall_accuracy', None)
+            
+            # 准备每类指标
+            per_class_iou = print_metrics.get('iou_per_class', print_metrics.get('per_class_iou', None))
+            per_class_precision = print_metrics.get('precision_per_class', print_metrics.get('per_class_precision', None))
+            per_class_recall = print_metrics.get('recall_per_class', print_metrics.get('per_class_recall', None))
+            per_class_f1 = print_metrics.get('f1_per_class', print_metrics.get('per_class_f1', None))
+            
+            # 兼容旧代码
+            if per_class_iou is None and 'mean_iou' in self.test_metrics:
+                metric = self.test_metrics['mean_iou']
+                if hasattr(metric, 'confusion_matrix'):
+                    confmat = metric.confusion_matrix.cpu().numpy()
+                    intersection = np.diag(confmat)
+                    union = confmat.sum(1) + confmat.sum(0) - np.diag(confmat)
+                    per_class_iou = intersection / (union + 1e-10)
+                    per_class_precision = intersection / (confmat.sum(0) + 1e-10)
+                    per_class_recall = intersection / (confmat.sum(1) + 1e-10)
+                    per_class_f1 = 2 * per_class_precision * per_class_recall / (per_class_precision + per_class_recall + 1e-10)
+
+            print(f"\n{'='*100}")
+            print(f"Test Results - Metrics")
+            print(f"{'='*100}")
+            if overall_acc is not None:
+                print(f"Overall Accuracy: {overall_acc:.4f} ({overall_acc*100:.2f}%)")
+            print(f"Mean IoU: {current_miou:.4f}")
+            print(f"{'='*100}")
+            
+            if per_class_iou is not None:
+                self._print_per_class_metrics(
+                    per_class_iou, per_class_precision, per_class_recall, per_class_f1,
+                    print_metrics, current_miou
+                )
+            print(f"{'='*100}\n")
+        except Exception as e:
+            print(f"Warning: Could not print detailed test metrics: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _print_per_class_metrics(
+        self, 
+        per_class_iou, 
+        per_class_precision, 
+        per_class_recall, 
+        per_class_f1,
+        print_metrics: Dict[str, Any],
+        mean_iou: float
+    ):
+        """
+        打印每个类别的详细指标表格
+        
+        Args:
+            per_class_iou: 每类 IoU 数组
+            per_class_precision: 每类 Precision 数组
+            per_class_recall: 每类 Recall 数组
+            per_class_f1: 每类 F1 数组
+            print_metrics: 指标字典（用于获取类别名）
+            mean_iou: 平均 IoU
+        """
+        # 获取类别名
+        class_names = print_metrics.get('class_names', None)
+        if class_names is None:
+            class_names = self.hparams.get('class_names', None) if hasattr(self, 'hparams') else None
+        
+        # 确保是 numpy 数组
+        if isinstance(per_class_iou, torch.Tensor): 
+            per_class_iou = per_class_iou.cpu().numpy()
+        if isinstance(per_class_precision, torch.Tensor): 
+            per_class_precision = per_class_precision.cpu().numpy()
+        if isinstance(per_class_recall, torch.Tensor): 
+            per_class_recall = per_class_recall.cpu().numpy()
+        if isinstance(per_class_f1, torch.Tensor): 
+            per_class_f1 = per_class_f1.cpu().numpy()
+        
+        num_classes = len(per_class_iou)
+        
+        # 计算最大类别名宽度
+        max_name_width = 8  # 最小宽度
+        for i in range(num_classes):
+            c_name = class_names[i] if class_names and i < len(class_names) else f"Class {i}"
+            max_name_width = max(max_name_width, _display_width(c_name))
+        max_name_width = min(max_name_width, 20)  # 最大宽度限制
+        
+        # 表头
+        header_class = _pad_to_width("Class", max_name_width)
+        print(f"  {header_class}  {'IoU':>8}  {'Precision':>10}  {'Recall':>8}  {'F1-Score':>10}")
+        print(f"  {'-'*max_name_width}  {'-'*8}  {'-'*10}  {'-'*8}  {'-'*10}")
+        
+        for i in range(num_classes):
+            c_name = class_names[i] if class_names and i < len(class_names) else f"Class {i}"
+            c_name_padded = _pad_to_width(c_name, max_name_width)
+            print(f"  {c_name_padded}  {per_class_iou[i]:8.4f}  {per_class_precision[i]:10.4f}  "
+                  f"{per_class_recall[i]:8.4f}  {per_class_f1[i]:10.4f}")
+        
+        # 计算平均指标
+        mean_precision = np.nanmean(per_class_precision)
+        mean_recall = np.nanmean(per_class_recall)
+        mean_f1 = np.nanmean(per_class_f1)
+        
+        print(f"  {'-'*max_name_width}  {'-'*8}  {'-'*10}  {'-'*8}  {'-'*10}")
+        mean_label = _pad_to_width("Mean", max_name_width)
+        print(f"  {mean_label}  {mean_iou:8.4f}  {mean_precision:10.4f}  "
+              f"{mean_recall:8.4f}  {mean_f1:10.4f}")

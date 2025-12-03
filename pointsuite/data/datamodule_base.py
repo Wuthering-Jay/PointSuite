@@ -207,6 +207,9 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         参数：
             stage: 当前阶段（'fit'、'validate'、'test'、'predict'，或 None 表示所有阶段）
         """
+        # 🔍 调试：打印 setup 被调用的 stage
+        print(f"[DEBUG] DataModuleBase.setup(stage='{stage}')")
+        
         # 设置训练数据集
         if (stage == 'fit' or stage is None) and self.train_data is not None:
             self.train_dataset = self._create_dataset(
@@ -241,11 +244,13 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         
         # 设置预测数据集（独立于测试）
         if (stage == 'predict' or stage is None) and self.predict_data is not None:
+            print(f"[DEBUG] Creating predict_dataset from predict_data={self.predict_data}")
             self.predict_dataset = self._create_dataset(
                 data_paths=self.predict_data,
                 split='predict',
                 transforms=self.predict_transforms
             )
+            print(f"[DEBUG] predict_dataset created with {len(self.predict_dataset)} samples")
     
     def _compute_sample_weights(self, dataset):
         """
@@ -352,11 +357,13 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         
         if _use_dynamic_batch:
             # 使用 DynamicBatchSampler（可以与 base_sampler 结合）
+            # 注意：shuffle 控制是否打乱，同时也决定 batch 数的计算方式
+            # - shuffle=True: 保守估计 batch 数，用于训练
+            # - shuffle=False: 精确计算 batch 数，用于 test/predict
             batch_sampler = DynamicBatchSampler(
                 dataset=dataset,
                 max_points=_max_points,
                 shuffle=(shuffle and base_sampler is None),  # 仅在没有 base_sampler 时打乱
-                drop_last=drop_last,
                 sampler=base_sampler
             )
             
@@ -398,11 +405,9 @@ class DataModuleBase(pl.LightningDataModule, ABC):
     
     def val_dataloader(self) -> DataLoader:
         """创建并返回验证 DataLoader（必须访问所有样本）"""
-        print(f"[DEBUG] val_dataloader() called, val_dataset={self.val_dataset is not None}, len={len(self.val_dataset) if self.val_dataset else 0}")
         if self.val_dataset is None:
-            print("[DEBUG] WARNING: val_dataset is None!")
             return None
-        loader = self._create_dataloader(
+        return self._create_dataloader(
             dataset=self.val_dataset,
             shuffle=False,
             drop_last=False,
@@ -410,8 +415,6 @@ class DataModuleBase(pl.LightningDataModule, ABC):
             use_dynamic_batch=self.use_dynamic_batch_inference,
             max_points=self.max_points_inference
         )
-        print(f"[DEBUG] val_dataloader created with {len(loader)} batches")
-        return loader
     
     def test_dataloader(self) -> DataLoader:
         """创建并返回测试 DataLoader（必须访问所有样本）"""

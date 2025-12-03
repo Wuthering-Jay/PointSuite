@@ -5,12 +5,14 @@ import glob
 import pickle
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import BasePredictionWriter
-from typing import List, Any, Dict, Optional
+from typing import List, Any, Dict, Optional, Union
 from pathlib import Path
 from collections import defaultdict
 import time
 from pytorch_lightning.callbacks import Callback
 import datetime
+
+from .mapping import ClassMapping, ClassMappingInput, create_reverse_mapping
 
 
 # 导入 laspy (您需要 'pip install laspy')
@@ -25,13 +27,15 @@ except ImportError:
 # 辅助函数
 # ============================================
 
-def create_reverse_class_mapping(class_mapping: Dict[int, int]) -> Dict[int, int]:
+def create_reverse_class_mapping(class_mapping: ClassMappingInput) -> Optional[Dict[int, int]]:
     """
     从 class_mapping 创建 reverse_class_mapping
     
     Args:
-        class_mapping: 原始标签 -> 连续标签的映射
-                      例如: {0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
+        class_mapping: 类别映射配置，支持以下格式：
+            - None: 返回 None
+            - Dict[int, int]: 原始标签 -> 连续标签的映射
+            - List[int]: 原始类别ID列表
     
     Returns:
         reverse_class_mapping: 连续标签 -> 原始标签的映射
@@ -42,8 +46,14 @@ def create_reverse_class_mapping(class_mapping: Dict[int, int]) -> Dict[int, int
         >>> reverse_mapping = create_reverse_class_mapping(class_mapping)
         >>> print(reverse_mapping)
         {0: 0, 1: 1, 2: 2, 3: 6, 4: 9}
+        
+        >>> # 也支持列表形式
+        >>> class_mapping = [0, 1, 2, 6, 9]  # 自动映射为 {0:0, 1:1, 2:2, 6:3, 9:4}
+        >>> reverse_mapping = create_reverse_class_mapping(class_mapping)
+        >>> print(reverse_mapping)
+        {0: 0, 1: 1, 2: 2, 3: 6, 4: 9}
     """
-    return {v: k for k, v in class_mapping.items()}
+    return create_reverse_mapping(class_mapping)
 
 
 class SemanticPredictLasWriter(BasePredictionWriter):
@@ -125,19 +135,35 @@ class SemanticPredictLasWriter(BasePredictionWriter):
             
         # 按 bin 文件分组
         bin_file_groups = self._group_temp_files(tmp_files)
-        pl_module.print(f"[SemanticPredictLasWriter] 检测到 {len(bin_file_groups)} 个唯一 bin 文件")
+        pl_module.print(f"[SemanticPredictLasWriter] 检测到 {len(bin_file_groups)} 个唯一 bin 文件:")
+        for name in sorted(bin_file_groups.keys()):
+            pl_module.print(f"  - {name}: {len(bin_file_groups[name])} 个批次")
+        
+        # 跟踪成功和失败
+        success_files = []
+        failed_files = []
         
         try:
             for bin_basename, file_list in bin_file_groups.items():
                 pl_module.print(f"\n[SemanticPredictLasWriter] 处理 bin 文件: {bin_basename} ({len(file_list)} 个批次)")
                 try:
                     self._process_single_bin_file(bin_basename, file_list, trainer, pl_module)
+                    success_files.append(bin_basename)
                 except Exception as e:
                     pl_module.print(f"!!! 错误: 处理 {bin_basename} 时失败: {e}")
                     import traceback
                     traceback.print_exc()
+                    failed_files.append((bin_basename, str(e)))
         finally:
             self._cleanup_temp_files(tmp_files, pl_module)
+        
+        # 输出总结
+        pl_module.print(f"\n[SemanticPredictLasWriter] 处理总结:")
+        pl_module.print(f"  - 成功: {len(success_files)} 个文件")
+        if failed_files:
+            pl_module.print(f"  - 失败: {len(failed_files)} 个文件")
+            for name, err in failed_files:
+                pl_module.print(f"    - {name}: {err}")
 
     # ================= 内部辅助方法 =================
 
@@ -155,7 +181,8 @@ class SemanticPredictLasWriter(BasePredictionWriter):
             if hasattr(pl_module, 'hparams') and hasattr(pl_module.hparams, 'class_mapping'):
                 mapping = pl_module.hparams.class_mapping
                 if mapping:
-                    self.reverse_class_mapping = {v: k for k, v in mapping.items()}
+                    # 使用 create_reverse_mapping 处理 Dict 或 List
+                    self.reverse_class_mapping = create_reverse_mapping(mapping)
                     self._mapping_inferred = True
                     pl_module.print(f"[SemanticPredictLasWriter] 从模型 checkpoint 加载 reverse_class_mapping")
                     return
@@ -166,7 +193,8 @@ class SemanticPredictLasWriter(BasePredictionWriter):
         try:
             datamodule = trainer.datamodule
             if hasattr(datamodule, 'class_mapping') and datamodule.class_mapping:
-                self.reverse_class_mapping = {v: k for k, v in datamodule.class_mapping.items()}
+                # 使用 create_reverse_mapping 处理 Dict 或 List
+                self.reverse_class_mapping = create_reverse_mapping(datamodule.class_mapping)
                 self._mapping_inferred = True
                 pl_module.print(f"[SemanticPredictLasWriter] 从 DataModule 推断 reverse_class_mapping")
             else:
@@ -709,7 +737,9 @@ class TextLoggingCallback(Callback):
 
     def on_train_epoch_start(self, trainer, pl_module):
         self._reset_timer()
-        print(f"\n{'='*40}\nEpoch {trainer.current_epoch} Started\n{'='*40}")
+        display_epoch = trainer.current_epoch + 1
+        max_epochs = trainer.max_epochs if trainer.max_epochs else "?"
+        print(f"\n{'='*40}\nEpoch {display_epoch}/{max_epochs} Started\n{'='*40}")
 
     def on_validation_epoch_start(self, trainer, pl_module):
         self._reset_timer()
@@ -756,9 +786,12 @@ class TextLoggingCallback(Callback):
         elif stage == "Pred":
             total_batches = sum(trainer.num_predict_batches) if isinstance(trainer.num_predict_batches, list) else trainer.num_predict_batches
             
-        # Epoch Info
-        max_epochs = trainer.max_epochs if trainer.max_epochs is not None else "?"
-        epoch_str = f"[{trainer.current_epoch}/{max_epochs}]"
+        # Epoch Info (1-based display) - 仅在 Train/Val 阶段显示
+        epoch_str = ""
+        if stage in ("Train", "Val"):
+            max_epochs = trainer.max_epochs if trainer.max_epochs is not None else "?"
+            display_epoch = trainer.current_epoch + 1
+            epoch_str = f"[{display_epoch}/{max_epochs}] "
 
         # 2. Time Calculation
         now = time.time()
@@ -846,7 +879,7 @@ class TextLoggingCallback(Callback):
                 metrics_str = ", " + ", ".join(metrics_str_parts)
 
         # Print
-        print(f"[{stage}] {epoch_str} [{current_batch}/{total_batches}] "
+        print(f"[{stage}] {epoch_str}[{current_batch}/{total_batches}] "
               f"{elapsed_str}<{remaining_str}, {avg_time:.2f}s/it"
               f"{lr_str}{metrics_str}, bs={batch_size}, pts={pts_str}")
 
@@ -959,6 +992,43 @@ class SemanticPredictLasWriter1(BasePredictionWriter):
         print("╚" + "═" * 68 + "╝")
         print()
         
+        # ========== 调试信息：比较预期文件和实际收到的文件 ==========
+        print("  🔍 [调试] 数据覆盖诊断:")
+        print(f"     - 预测过程中遇到的文件: {len(self._stats['files_processed'])}")
+        for f in sorted(self._stats['files_processed']):
+            print(f"       • {f}")
+        
+        # 获取数据集中预期的所有文件
+        try:
+            dataset = trainer.predict_dataloaders.dataset
+            expected_files = set()
+            if hasattr(dataset, 'data_list'):
+                for item in dataset.data_list:
+                    bin_path = item.get('bin_path', '')
+                    if bin_path:
+                        expected_files.add(Path(bin_path).stem)
+            print(f"     - 数据集中预期的文件: {len(expected_files)}")
+            for f in sorted(expected_files):
+                print(f"       • {f}")
+            
+            # 检查遗漏
+            missing = expected_files - self._stats['files_processed']
+            extra = self._stats['files_processed'] - expected_files
+            if missing:
+                print(f"     ⚠️  遗漏的文件 ({len(missing)}):")
+                for f in sorted(missing):
+                    print(f"       • {f}")
+            if extra:
+                print(f"     ⚠️  额外的文件 ({len(extra)}):")
+                for f in sorted(extra):
+                    print(f"       • {f}")
+            if not missing and not extra:
+                print(f"     ✅ 所有文件都已处理!")
+        except Exception as e:
+            print(f"     ⚠️  无法获取预期文件列表: {e}")
+        print()
+        # ========== 调试信息结束 ==========
+        
         tmp_files = sorted(glob.glob(os.path.join(self.temp_dir, "*.pred.tmp")))
         if not tmp_files:
             print("  ⚠️  警告: 未找到临时预测文件")
@@ -1011,7 +1081,8 @@ class SemanticPredictLasWriter1(BasePredictionWriter):
             if hasattr(pl_module, 'hparams') and hasattr(pl_module.hparams, 'class_mapping'):
                 mapping = pl_module.hparams.class_mapping
                 if mapping:
-                    self.reverse_class_mapping = {v: k for k, v in mapping.items()}
+                    # 使用 create_reverse_mapping 处理 Dict 或 List
+                    self.reverse_class_mapping = create_reverse_mapping(mapping)
                     self._mapping_inferred = True
                     print(f"  ℹ️  从模型 checkpoint 加载 reverse_class_mapping")
                     return
@@ -1022,7 +1093,8 @@ class SemanticPredictLasWriter1(BasePredictionWriter):
         try:
             datamodule = trainer.datamodule
             if hasattr(datamodule, 'class_mapping') and datamodule.class_mapping:
-                self.reverse_class_mapping = {v: k for k, v in datamodule.class_mapping.items()}
+                # 使用 create_reverse_mapping 处理 Dict 或 List
+                self.reverse_class_mapping = create_reverse_mapping(datamodule.class_mapping)
                 self._mapping_inferred = True
                 print(f"  ℹ️  从 DataModule 推断 reverse_class_mapping")
             else:

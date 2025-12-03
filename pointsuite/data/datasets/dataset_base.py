@@ -2,12 +2,13 @@ import os
 import json
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any, Optional, Union
 from abc import ABC, abstractmethod
 
 from torch.utils.data import Dataset
 from collections.abc import Sequence
 from ..transforms import Compose
+from ...utils.mapping import ClassMapping, ClassMappingInput, normalize_class_mapping
 
 
 class DatasetBase(Dataset, ABC):
@@ -36,8 +37,7 @@ class DatasetBase(Dataset, ABC):
             transform: Optional[List] = None,
             ignore_label: int = -1,
             loop: int = 1,
-            cache_data: bool = False,
-            class_mapping: Optional[Dict[int, int]] = None,
+            class_mapping: ClassMappingInput = None,
             **kwargs
     ):
         """
@@ -50,10 +50,11 @@ class DatasetBase(Dataset, ABC):
             transform: 要应用的数据变换
             ignore_label: 在训练/评估中忽略的标签
             loop: 遍历数据集的次数（用于训练增强）
-            cache_data: 是否在内存中缓存加载的数据，数据集较小时适用
-            class_mapping: 将原始类别标签映射到连续标签的字典
-                          示例：{0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
-                          如果为 None，则不应用映射
+            class_mapping: 类别标签映射配置，支持以下格式：
+                - None: 不做映射，使用原始标签
+                - Dict[int, int]: 显式映射 {原始ID: 新ID}
+                - List[int]: 原始类别ID列表，自动映射为 [0, 1, 2, ...]
+                示例：{1: 0, 2: 1, 6: 2} 或 [1, 2, 6]（两者等价）
             **kwargs: 子类的其他参数
         """
         super().__init__()
@@ -71,11 +72,11 @@ class DatasetBase(Dataset, ABC):
         self.transform = Compose(transform) if transform is not None else None
         self.ignore_label = ignore_label
         self.loop = loop  # 支持所有 split 的 loop（Test-Time Augmentation）
-        self.cache_data = cache_data
-        self.class_mapping = class_mapping
         
-        # 如果启用则缓存数据
-        self.data_cache = {} if cache_data else None
+        # 🔥 标准化类别映射：支持 Dict、List 或 None
+        self.class_mapping = normalize_class_mapping(class_mapping, ignore_label)
+        # 保存 ClassMapping 实例以便使用其方法
+        self._class_mapper = ClassMapping(class_mapping, ignore_label)
         
         # 缓存类别权重
         self._class_weights = None
@@ -98,7 +99,6 @@ class DatasetBase(Dataset, ABC):
         print(f"    - 总样本数: {len(self.data_list)}")
         print(f"    - 属性: {self.assets}")
         print(f"    - 循环: {self.loop}")
-        print(f"    - 缓存: {'已启用' if self.cache_data else '已禁用'}")
     
     @abstractmethod
     def _load_data_list(self) -> List[Dict[str, Any]]:
@@ -142,16 +142,8 @@ class DatasetBase(Dataset, ABC):
         # 处理循环
         data_idx = idx % len(self.data_list)
         
-        # 检查缓存
-        if self.cache_data and data_idx in self.data_cache:
-            data_dict = self.data_cache[data_idx].copy()
-        else:
-            # 加载数据（由子类实现）
-            data_dict = self._load_data(data_idx)
-            
-            # 如果启用则缓存
-            if self.cache_data:
-                self.data_cache[data_idx] = data_dict.copy()
+        # 加载数据（由子类实现）
+        data_dict = self._load_data(data_idx)
         
         # 应用变换
         if self.transform is not None:

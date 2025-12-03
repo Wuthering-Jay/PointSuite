@@ -24,8 +24,7 @@ from pointsuite.data import BinPklDataModule
 from pointsuite.data.transforms import ToTensor, Collect, CenterShift
 from pointsuite.tasks import SemanticSegmentationTask
 from pointsuite.models import PointTransformerV2, SegHead
-from pointsuite.utils.callbacks import SemanticPredictLasWriter
-from pointsuite.utils.progress_bar import CustomProgressBar
+from pointsuite.utils.callbacks import SemanticPredictLasWriter, TextLoggingCallback
 
 
 def main():
@@ -181,7 +180,7 @@ def main():
             reverse_class_mapping=reverse_mapping, # 传入从模型提取的反向映射
             auto_infer_reverse_mapping=False #既然已经传入了，就不需要自动推断了
         ),
-        CustomProgressBar(refresh_rate=1),
+        TextLoggingCallback(log_interval=10),
     ]
     
     trainer = pl.Trainer(
@@ -190,7 +189,7 @@ def main():
         precision="bf16-mixed", # 使用 bf16-mixed 加速预测 (与训练一致)
         logger=False,  # Predict 时不需要 logger
         callbacks=callbacks,
-        enable_progress_bar=True,
+        enable_progress_bar=False,  # 使用 TextLoggingCallback 代替
         enable_model_summary=False,
     )
     

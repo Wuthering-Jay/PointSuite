@@ -10,6 +10,7 @@ from torchmetrics import Metric
 from typing import Optional, List, Dict
 
 from .base import ConfusionMatrixBase, create_class_names, convert_preds_to_labels
+from ..mapping import create_reverse_mapping
 
 
 class OverallAccuracy(Metric):
@@ -169,7 +170,8 @@ class PerClassIoU(ConfusionMatrixBase):
                             if hasattr(dm, 'class_names') and dm.class_names is not None:
                                 self._cached_class_names = dm.class_names
                             elif hasattr(dm, 'class_mapping') and dm.class_mapping is not None:
-                                reverse_mapping = {v: k for k, v in dm.class_mapping.items()}
+                                # 使用 create_reverse_mapping 处理 Dict 或 List
+                                reverse_mapping = create_reverse_mapping(dm.class_mapping)
                                 self._cached_class_names = create_class_names(
                                     self.num_classes,
                                     reverse_class_mapping=reverse_mapping

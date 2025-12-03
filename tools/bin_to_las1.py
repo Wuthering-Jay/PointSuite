@@ -1,17 +1,17 @@
 """
 bin+pkl 逻辑索引格式转 LAS 文件工具
 
-对应 tile_las1.py 的逻辑索引分块方式，将分块数据转换回 LAS 格式便于在专业软件中查看。
+对应 tile_las.py 的逻辑索引分块方式，将分块数据转换回 LAS 格式便于在专业软件中查看。
 
 支持两种模式：
 1. 全量模式 (full): 直接按 window size 分块转换，包含所有原始点
-2. 体素模式 (voxel): 利用 grid_size 体素化索引进行模运算采样
+2. 网格采样模式 (grid): 利用 grid_size 网格化索引进行模运算采样
    - 支持 max_loops 限制总采样次数
    - 支持包含重复点的多轮采样（模拟训练时的数据增强效果）
 
 用途：
 - 检查分块效果是否正确
-- 验证体素化采样逻辑
+- 验证网格采样逻辑
 - 在 CloudCompare 等软件中可视化查看
 """
 
@@ -178,24 +178,24 @@ def create_las_from_segment(segment_data: np.ndarray,
     las.write(output_path)
 
 
-def voxel_modulo_sample(segment_info: dict, 
-                        mmap_data: np.ndarray,
-                        loop_idx: int,
-                        points_per_loop: int = 1) -> np.ndarray:
+def grid_modulo_sample(segment_info: dict, 
+                       mmap_data: np.ndarray,
+                       loop_idx: int,
+                       points_per_loop: int = 1) -> np.ndarray:
     """
-    对 segment 进行体素模运算采样
+    对 segment 进行网格模运算采样
     
-    利用 tile_las1.py 中预计算的 sort_idx 和 voxel_counts 进行高效采样。
+    利用 tile_las.py 中预计算的 sort_idx 和 voxel_counts 进行高效采样。
     
     采样逻辑：
-    - 正常情况 (voxel_count <= num_loops): 每轮采样 1 个点，使用模运算循环选择
-    - 极端情况 (voxel_count > num_loops): 每轮采样多个点 (points_per_loop)，确保所有点都被采样
+    - 正常情况 (grid_count <= num_loops): 每轮采样 1 个点，使用模运算循环选择
+    - 极端情况 (grid_count > num_loops): 每轮采样多个点 (points_per_loop)，确保所有点都被采样
     
     Args:
         segment_info: segment 元数据，包含 indices, sort_idx, voxel_counts
         mmap_data: 内存映射的 bin 数据
         loop_idx: 当前采样轮次 (0-indexed)
-        points_per_loop: 每轮从每个体素采样的点数 (用于极端情况)
+        points_per_loop: 每轮从每个网格采样的点数 (用于极端情况)
         
     Returns:
         采样后的结构化数组
@@ -204,31 +204,31 @@ def voxel_modulo_sample(segment_info: dict,
     sort_idx = segment_info.get('sort_idx', None)
     voxel_counts = segment_info.get('voxel_counts', None)
     
-    # 如果没有体素化信息，返回全部数据
+    # 如果没有网格化信息，返回全部数据
     if sort_idx is None or voxel_counts is None:
         return mmap_data[indices]
     
-    # 体素模运算采样
-    # sort_idx 是按体素 hash 排序后的局部索引
-    # voxel_counts 是每个体素的点数
+    # 网格模运算采样
+    # sort_idx 是按网格 hash 排序后的局部索引
+    # voxel_counts 是每个网格的点数
     
-    # 计算每个体素的起始位置
+    # 计算每个网格的起始位置
     cumsum = np.cumsum(np.insert(voxel_counts, 0, 0))
     
     # 采样索引列表
     sampled_local_indices = []
     
-    for voxel_idx in range(len(voxel_counts)):
-        voxel_count = voxel_counts[voxel_idx]
-        start_pos = cumsum[voxel_idx]
+    for grid_idx in range(len(voxel_counts)):
+        grid_count = voxel_counts[grid_idx]
+        start_pos = cumsum[grid_idx]
         
         # 根据 points_per_loop 计算本轮采样的点
-        # 对于点数少的体素，使用模运算进行重复采样
+        # 对于点数少的网格，使用模运算进行重复采样
         for p in range(points_per_loop):
             # 计算当前轮次要采的第 p 个点的逻辑位置
             logical_idx = loop_idx * points_per_loop + p
-            # 模运算：循环采样（对于点数少的体素会重复采样）
-            local_idx = logical_idx % voxel_count
+            # 模运算：循环采样（对于点数少的网格会重复采样）
+            local_idx = logical_idx % grid_count
             sampled_local_indices.append(sort_idx[start_pos + local_idx])
     
     sampled_local_indices = np.array(sampled_local_indices, dtype=np.int32)
@@ -245,7 +245,7 @@ class BinToLasConverter:
     
     支持两种模式：
     - full: 全量模式，输出所有原始点
-    - voxel: 体素模式，使用体素化索引进行模运算采样
+    - grid: 网格采样模式，使用网格化索引进行模运算采样
     """
     
     def __init__(self,
@@ -264,11 +264,11 @@ class BinToLasConverter:
             output_dir: 输出目录 (默认为 input_dir/las_output)
             mode: 转换模式
                 - 'full': 全量模式，输出所有原始点
-                - 'voxel': 体素模式，使用体素化索引进行采样
-            max_loops: 体素模式下的最大采样轮次
-                - None: 按体素内最大点数进行采样（每轮采 1 个点）
-                - 设置值: 如果体素最大点数 > max_loops，则每轮采多个点以确保在 max_loops 轮内采完
-                - 如果 max_loops > 体素最大点数，则按实际最大点数采样
+                - 'grid': 网格采样模式，使用网格化索引进行采样
+            max_loops: 网格采样模式下的最大采样轮次
+                - None: 按网格内最大点数进行采样（每轮采 1 个点）
+                - 设置值: 如果网格最大点数 > max_loops，则每轮采多个点以确保在 max_loops 轮内采完
+                - 如果 max_loops > 网格最大点数，则按实际最大点数采样
             segment_ids: 要转换的 segment ID 列表 (None 表示全部)
             max_segments: 最多转换多少个 segment (None 表示不限制)
             n_workers: 并行工作线程数
@@ -318,8 +318,8 @@ class BinToLasConverter:
         print(f"  {Colors.DIM}├─{Colors.RESET} 输出目录: {Colors.CYAN}{self.output_dir}{Colors.RESET}")
         print(f"  {Colors.DIM}├─{Colors.RESET} 文件数量: {Colors.GREEN}{len(self.file_pairs)}{Colors.RESET}")
         print(f"  {Colors.DIM}├─{Colors.RESET} 转换模式: {Colors.YELLOW}{self.mode}{Colors.RESET}")
-        if self.mode == 'voxel':
-            max_loops_str = str(self.max_loops) if self.max_loops is not None else "自动 (按最大体素点数)"
+        if self.mode == 'grid':
+            max_loops_str = str(self.max_loops) if self.max_loops is not None else "自动 (按最大网格点数)"
             print(f"  {Colors.DIM}├─{Colors.RESET} 最大轮次: {Colors.YELLOW}{max_loops_str}{Colors.RESET}")
         if self.max_segments:
             print(f"  {Colors.DIM}├─{Colors.RESET} 每文件最大: {Colors.YELLOW}{self.max_segments} segments{Colors.RESET}")
@@ -401,8 +401,8 @@ class BinToLasConverter:
                 mmap_data, segments_info, seg_ids, 
                 header_info, file_output_dir, base_name
             )
-        elif self.mode == 'voxel':
-            self._convert_voxel_mode(
+        elif self.mode == 'grid':
+            self._convert_grid_mode(
                 mmap_data, segments_info, seg_ids,
                 header_info, file_output_dir, base_name,
                 grid_size
@@ -452,7 +452,7 @@ class BinToLasConverter:
         
         print(f"  {Colors.DIM}│{Colors.RESET}   → 成功: {Colors.GREEN}{success_count}/{len(seg_ids)}{Colors.RESET} segments")
     
-    def _convert_voxel_mode(self,
+    def _convert_grid_mode(self,
                             mmap_data: np.ndarray,
                             segments_info: List[Dict],
                             seg_ids: List[int],
@@ -461,14 +461,14 @@ class BinToLasConverter:
                             base_name: str,
                             grid_size: Optional[float]):
         """
-        体素模式转换：使用体素化索引进行模运算采样
+        网格采样模式转换：使用网格化索引进行模运算采样
         
         采样策略：
-        - max_loops=None: 按体素内最大点数 max_count 进行 max_count 轮采样，每轮采 1 个点
+        - max_loops=None: 按网格内最大点数 max_count 进行 max_count 轮采样，每轮采 1 个点
         - max_loops 设置时:
           - 如果 max_count <= max_loops: 按 max_count 轮采样，每轮采 1 个点
           - 如果 max_count > max_loops: 按 max_loops 轮采样，每轮采 ceil(max_count/max_loops) 个点
-        - 对于点数少于采样轮数的体素：使用模运算重复采样
+        - 对于点数少于采样轮数的网格：使用模运算重复采样
         """
         if grid_size is None:
             print(f"  {Colors.YELLOW}⚠️  警告: 未找到 grid_size 信息，回退到全量模式{Colors.RESET}")
@@ -513,8 +513,8 @@ class BinToLasConverter:
                         points_per_loop = int(np.ceil(max_voxel_count / self.max_loops))
                     
                     for loop_idx in range(actual_loops):
-                        # 体素模运算采样（传入 points_per_loop）
-                        segment_data = voxel_modulo_sample(
+                        # 网格模运算采样（传入 points_per_loop）
+                        segment_data = grid_modulo_sample(
                             segment_info, mmap_data, loop_idx, points_per_loop
                         )
                         

@@ -1,32 +1,142 @@
-"""
-用于加载 bin+pkl 格式点云数据的数据集
+﻿"""
+用于加载 bin+pkl 逻辑索引格式点云数据的数据集 (对应 tile_las.py)
 
-本模块实现了我们自定义 bin+pkl 数据格式的数据集类，
-其中点云数据存储在二进制文件（.bin）中，元数据存储在 pickle 文件（.pkl）中
+本模块实现了 bin+pkl 数据格式的数据集类，支持：
+1. 全量模式 (full): 加载所有原始点
+2. 网格采样模式 (grid): 使用网格化索引进行采样
+   - train/val: 从每个网格随机取 1 个点
+   - test/predict: 使用模运算采样确保全覆盖
+
+数据结构 (tile_las.py 生成):
+- .bin 文件：以结构化 numpy 数组格式包含所有点数据
+- .pkl 文件：包含元数据，包括：
+    - segments: 分块信息列表，每个分块包含：
+        - indices: 点索引
+        - sort_idx: 网格化排序索引
+        - voxel_counts: 每个网格的点数
+        - num_voxels: 网格数量
+        - max_voxel_density: 最大网格点数
+    - header_info: 原始 LAS 文件头
+    - grid_size: 网格大小
 """
 import numpy as np
 import pickle
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple, Union
+from numba import jit, prange
 
 from .dataset_base import DatasetBase
+from ...utils.mapping import ClassMappingInput
+
+
+# ============================================================================
+# Numba 加速采样函数
+# ============================================================================
+
+@jit(nopython=True, cache=True)
+def _grid_random_sample_numba(sort_idx: np.ndarray, 
+                               grid_counts: np.ndarray,
+                               cumsum: np.ndarray) -> np.ndarray:
+    """
+    Numba 加速的随机网格采样
+    从每个网格中随机采样 1 个点
+    """
+    n_grids = len(grid_counts)
+    sampled = np.empty(n_grids, dtype=np.int32)
+    
+    for i in range(n_grids):
+        grid_count = grid_counts[i]
+        start_pos = cumsum[i]
+        # 使用 numpy 随机数
+        random_offset = np.random.randint(0, grid_count)
+        sampled[i] = sort_idx[start_pos + random_offset]
+    
+    return sampled
+
+
+@jit(nopython=True, cache=True)
+def _grid_modulo_sample_numba(sort_idx: np.ndarray,
+                               grid_counts: np.ndarray,
+                               cumsum: np.ndarray,
+                               loop_idx: int,
+                               points_per_loop: int) -> np.ndarray:
+    """
+    Numba 加速的模运算网格采样
+    """
+    n_grids = len(grid_counts)
+    total_points = n_grids * points_per_loop
+    sampled = np.empty(total_points, dtype=np.int32)
+    
+    idx = 0
+    for i in range(n_grids):
+        grid_count = grid_counts[i]
+        start_pos = cumsum[i]
+        
+        for p in range(points_per_loop):
+            logical_idx = loop_idx * points_per_loop + p
+            local_idx = logical_idx % grid_count
+            sampled[idx] = sort_idx[start_pos + local_idx]
+            idx += 1
+    
+    return sampled
+
+
+@jit(nopython=True, parallel=True, cache=True)
+def _grid_random_sample_parallel(sort_idx: np.ndarray, 
+                                  grid_counts: np.ndarray,
+                                  cumsum: np.ndarray,
+                                  random_offsets: np.ndarray) -> np.ndarray:
+    """
+    Numba 并行加速的随机网格采样
+    注意：需要预生成随机数以避免并行随机数问题
+    """
+    n_grids = len(grid_counts)
+    sampled = np.empty(n_grids, dtype=np.int32)
+    
+    for i in prange(n_grids):
+        grid_count = grid_counts[i]
+        start_pos = cumsum[i]
+        random_offset = random_offsets[i] % grid_count
+        sampled[i] = sort_idx[start_pos + random_offset]
+    
+    return sampled
+
+
+@jit(nopython=True, parallel=True, cache=True)
+def _grid_modulo_sample_parallel(sort_idx: np.ndarray,
+                                  grid_counts: np.ndarray,
+                                  cumsum: np.ndarray,
+                                  loop_idx: int,
+                                  points_per_loop: int) -> np.ndarray:
+    """
+    Numba 并行加速的模运算网格采样
+    """
+    n_grids = len(grid_counts)
+    total_points = n_grids * points_per_loop
+    sampled = np.empty(total_points, dtype=np.int32)
+    
+    for i in prange(n_grids):
+        grid_count = grid_counts[i]
+        start_pos = cumsum[i]
+        base_idx = i * points_per_loop
+        
+        for p in range(points_per_loop):
+            logical_idx = loop_idx * points_per_loop + p
+            local_idx = logical_idx % grid_count
+            sampled[base_idx + p] = sort_idx[start_pos + local_idx]
+    
+    return sampled
 
 
 class BinPklDataset(DatasetBase):
     """
-    bin+pkl 格式点云数据的数据集类
+    bin+pkl 逻辑索引格式点云数据的数据集类 (对应 tile_las.py)
     
-    此数据集加载以二进制格式（.bin）存储的预处理点云片段，
-    元数据以 pickle 格式（.pkl）存储
-    
-    数据结构：
-    - .bin 文件：以结构化 numpy 数组格式包含所有点数据
-    - .pkl 文件：包含元数据，包括：
-        - 片段信息（索引、边界、标签计数）
-        - 原始 LAS 文件头
-        - 处理参数
-    
-    每个片段成为一个训练样本
+    支持两种模式：
+    - full: 全量模式，加载所有原始点
+    - grid: 网格采样模式，基于网格化索引采样
+      - train/val: 每个网格随机取 1 个点，数据集长度 = 分块数
+      - test/predict: 模运算采样确保全覆盖，数据集长度 = sum(actual_loops)
     """
     
     def __init__(
@@ -37,9 +147,10 @@ class BinPklDataset(DatasetBase):
         transform=None,
         ignore_label=-1,
         loop=1,
-        cache_data=False,
-        class_mapping=None,
-        h_norm_grid=1.0
+        class_mapping: ClassMappingInput = None,
+        h_norm_grid=1.0,
+        mode='grid',
+        max_loops: Optional[int] = None,
     ):
         """
         初始化 BinPklDataset
@@ -48,31 +159,39 @@ class BinPklDataset(DatasetBase):
             data_root: 包含 bin+pkl 文件的根目录，或单个 pkl 文件路径，
                       或 pkl 文件路径列表
             split: 数据集划分（'train'、'val'、'test'、'predict'）
-                  - train/val: 不存储点索引
-                  - test/predict: 存储点索引用于预测投票机制
             assets: 要加载的数据属性列表（默认：['coord', 'intensity', 'classification']）
             transform: 要应用的数据变换
             ignore_label: 在训练中忽略的标签
             loop: 遍历数据集的次数（用于训练）
-            cache_data: 是否在内存中缓存加载的数据
-                       - 如果为 True：所有加载的样本都缓存在内存中以加快重复访问
-                                     适用于能放入 RAM 的小型数据集
-                       - 如果为 False：每次从磁盘加载数据（使用 memmap 提高效率）
-                                      适用于大型数据集
-            class_mapping: 将原始类别标签映射到连续标签的字典
-                          示例：{0: 0, 1: 1, 2: 2, 6: 3, 9: 4}
-                          如果为 None，则不应用映射
+            class_mapping: 类别标签映射配置，支持以下格式：
+                - None: 不做映射，使用原始标签
+                - Dict[int, int]: 显式映射 {原始ID: 新ID}
+                - List[int]: 原始类别ID列表，自动映射为 [0, 1, 2, ...]
             h_norm_grid: 计算归一化高程时使用的栅格分辨率（米）
+            mode: 采样模式
+                - 'full': 全量模式，加载所有原始点
+                - 'grid': 网格采样模式，基于网格化索引采样
+            max_loops: 网格采样模式下的最大采样轮次 (仅 test/predict 生效)
+                - None: 按网格内最大点数进行采样
+                - 设置值: 限制最大轮数，确保在 max_loops 轮内采完所有点
         """
         # 如果未指定，则设置默认资产
         if assets is None:
-            assets = ['coord', 'intensity', 'classification']
+            assets = ['coord', 'classification']
         
-        # 初始化元数据缓存（显著加快数据加载速度）
+        # 🔥 兼容旧代码：voxel -> grid
+        if mode == 'voxel':
+            mode = 'grid'
+        
+        # 初始化缓存（用于 pkl 元数据和 memmap，不是完整数据缓存）
         self._metadata_cache = {}
+        self._metadata_cache_max_size = 4  # 最多缓存 4 个文件的元数据
+        self._mmap_cache = {}  # memmap 缓存（memmap 本身不占太多内存）
         self.h_norm_grid = h_norm_grid
+        self.mode = mode
+        self.max_loops = max_loops
         
-        # 调用父类初始化（传递 class_mapping 参数）
+        # 调用父类初始化
         super().__init__(
             data_root=data_root,
             split=split,
@@ -80,16 +199,18 @@ class BinPklDataset(DatasetBase):
             transform=transform,
             ignore_label=ignore_label,
             loop=loop,
-            cache_data=cache_data,
-            class_mapping=class_mapping  # 传递 class_mapping 给父类
+            class_mapping=class_mapping
         )
     
     def _load_data_list(self) -> List[Dict[str, Any]]:
         """
         加载所有数据样本的列表
         
-        返回：
-            包含样本信息的字典列表
+        根据模式和 split 生成不同的数据列表：
+        - full 模式: 每个 segment 一个样本
+        - grid 模式:
+          - train/val: 每个 segment 一个样本（随机采样）
+          - test/predict: 每个 segment 的每个 loop 一个样本
         """
         data_list = []
         
@@ -97,22 +218,19 @@ class BinPklDataset(DatasetBase):
         pkl_files = []
         
         if isinstance(self.data_root, (list, tuple)):
-            # pkl 文件路径列表
             pkl_files = [Path(p) for p in self.data_root]
             print(f"从 {len(pkl_files)} 个指定的 pkl 文件加载")
         elif self.data_root.is_file() and self.data_root.suffix == '.pkl':
-            # 单个 pkl 文件
             pkl_files = [self.data_root]
             print(f"从单个 pkl 文件加载: {self.data_root.name}")
         else:
-            # 包含 pkl 文件的目录
             pkl_files = sorted(self.data_root.glob('*.pkl'))
             if len(pkl_files) == 0:
                 raise ValueError(f"在 {self.data_root} 中未找到 pkl 文件")
             print(f"在目录中找到 {len(pkl_files)} 个 pkl 文件")
         
-        # 从每个 pkl 文件加载元数据
         total_segments = 0
+        total_samples = 0
         
         for pkl_path in pkl_files:
             if not pkl_path.exists():
@@ -125,21 +243,30 @@ class BinPklDataset(DatasetBase):
                 print(f"警告: {bin_path.name} 未找到，跳过 {pkl_path.name}")
                 continue
             
-            # 加载 pkl 元数据
+            # 加载 pkl 元数据（只在初始化时使用，不缓存到实例）
             with open(pkl_path, 'rb') as f:
                 metadata = pickle.load(f)
             
-            # 将每个片段添加为单独的数据样本
+            # 🔥 不再缓存完整元数据，避免多 worker 时内存爆炸
+            # 只提取必要的轻量级信息用于 data_list
+            
+            grid_size = metadata.get('grid_size', None)
+            
+            # 处理每个 segment
             for segment_info in metadata['segments']:
+                segment_id = segment_info['segment_id']
+                num_points = segment_info['num_points']
                 total_segments += 1
                 
-                data_list.append({
-                    'bin_path': str(bin_path),
-                    'pkl_path': str(pkl_path),
-                    'segment_id': segment_info['segment_id'],
-                    'num_points': segment_info['num_points'],
-                    'file_name': bin_path.stem,
-                    'bounds': {
+                # 获取体素信息
+                voxel_counts = segment_info.get('voxel_counts', None)
+                max_voxel_count = int(voxel_counts.max()) if voxel_counts is not None and len(voxel_counts) > 0 else 1
+                num_voxels = len(voxel_counts) if voxel_counts is not None else 0
+                
+                # 计算边界信息
+                bounds = segment_info.get('bounds', {})
+                if not bounds:
+                    bounds = {
                         'x_min': segment_info.get('x_min', 0),
                         'x_max': segment_info.get('x_max', 0),
                         'y_min': segment_info.get('y_min', 0),
@@ -147,41 +274,209 @@ class BinPklDataset(DatasetBase):
                         'z_min': segment_info.get('z_min', 0),
                         'z_max': segment_info.get('z_max', 0),
                     }
-                })
+                
+                # 根据模式和 split 决定如何生成样本
+                if self.mode == 'full':
+                    # 全量模式：每个 segment 一个样本
+                    data_list.append({
+                        'bin_path': str(bin_path),
+                        'pkl_path': str(pkl_path),
+                        'segment_id': segment_id,
+                        'num_points': num_points,
+                        'num_voxels': num_voxels,
+                        'max_voxel_count': max_voxel_count,
+                        'file_name': bin_path.stem,
+                        'bounds': bounds,
+                        'loop_idx': None,  # 全量模式无 loop
+                        'points_per_loop': None,
+                    })
+                    total_samples += 1
+                    
+                elif self.mode == 'grid':
+                    if self.split in ['train', 'val']:
+                        # train/val: 每个 segment 一个样本，随机采样
+                        data_list.append({
+                            'bin_path': str(bin_path),
+                            'pkl_path': str(pkl_path),
+                            'segment_id': segment_id,
+                            'num_points': num_points,
+                            'num_voxels': num_voxels,
+                            'max_voxel_count': max_voxel_count,
+                            'file_name': bin_path.stem,
+                            'bounds': bounds,
+                            'loop_idx': None,  # train/val 时为 None，表示随机采样
+                            'points_per_loop': 1,
+                        })
+                        total_samples += 1
+                        
+                    else:
+                        # test/predict: 每个 loop 一个样本，确保全覆盖
+                        if voxel_counts is None or num_voxels == 0:
+                            # 无体素化信息，单个样本
+                            actual_loops = 1
+                            points_per_loop = num_points
+                        else:
+                            # 计算实际轮数和每轮采样点数
+                            actual_loops, points_per_loop = self._compute_sampling_params(
+                                max_voxel_count, self.max_loops
+                            )
+                        
+                        for loop_idx in range(actual_loops):
+                            data_list.append({
+                                'bin_path': str(bin_path),
+                                'pkl_path': str(pkl_path),
+                                'segment_id': segment_id,
+                                'num_points': num_points,
+                                'num_voxels': num_voxels,
+                                'max_voxel_count': max_voxel_count,
+                                'file_name': bin_path.stem,
+                                'bounds': bounds,
+                                'loop_idx': loop_idx,
+                                'points_per_loop': points_per_loop,
+                                'actual_loops': actual_loops,
+                            })
+                            total_samples += 1
+                else:
+                    raise ValueError(f"未知模式: {self.mode}")
         
-        print(f"从 {len(pkl_files)} 个文件加载了 {total_segments} 个片段")
+        print(f"从 {len(pkl_files)} 个文件加载了 {total_segments} 个 segments, "
+              f"共 {total_samples} 个样本 (mode={self.mode}, split={self.split})")
         
         return data_list
+    
+    def _compute_sampling_params(self, max_voxel_count: int, max_loops: Optional[int]) -> Tuple[int, int]:
+        """
+        计算采样参数：实际轮数和每轮采样点数
+        
+        Args:
+            max_voxel_count: 体素内最大点数
+            max_loops: 最大采样轮次限制
+            
+        Returns:
+            (actual_loops, points_per_loop)
+        """
+        if max_loops is None:
+            # 未设置 max_loops：按最大体素点数采样，每轮采 1 个点
+            return max_voxel_count, 1
+        elif max_voxel_count <= max_loops:
+            # 最大点数 <= max_loops：按实际最大点数采样，每轮采 1 个点
+            return max_voxel_count, 1
+        else:
+            # 最大点数 > max_loops：限制轮数，每轮采多个点
+            points_per_loop = int(np.ceil(max_voxel_count / max_loops))
+            return max_loops, points_per_loop
+    
+    def _get_metadata(self, pkl_path: str) -> dict:
+        """获取元数据（带 LRU 缓存限制）"""
+        if pkl_path not in self._metadata_cache:
+            # 如果缓存满了，清除最旧的条目
+            if len(self._metadata_cache) >= self._metadata_cache_max_size:
+                # 移除第一个（最旧的）条目
+                oldest_key = next(iter(self._metadata_cache))
+                del self._metadata_cache[oldest_key]
+            
+            with open(pkl_path, 'rb') as f:
+                self._metadata_cache[pkl_path] = pickle.load(f)
+        return self._metadata_cache[pkl_path]
+    
+    def _get_mmap(self, bin_path: str, dtype) -> np.ndarray:
+        """获取缓存的 memmap"""
+        if bin_path not in self._mmap_cache:
+            self._mmap_cache[bin_path] = np.memmap(bin_path, dtype=dtype, mode='r')
+        return self._mmap_cache[bin_path]
+    
+    def _grid_random_sample(self, segment_info: dict, mmap_data: np.ndarray) -> np.ndarray:
+        """
+        从每个网格中随机采样 1 个点 (用于 train/val)
+        使用 Numba 加速
+        
+        随机性保证：使用纳秒级时间戳作为种子，确保每次调用都有不同的采样结果，
+        不受 pl.seed_everything() 全局种子影响。
+        
+        Args:
+            segment_info: segment 元数据
+            mmap_data: 内存映射的 bin 数据
+            
+        Returns:
+            采样后的结构化数组
+        """
+        indices = segment_info['indices']
+        sort_idx = segment_info.get('sort_idx', None)
+        voxel_counts = segment_info.get('voxel_counts', None)
+        
+        # 如果没有网格化信息，返回全部数据
+        if sort_idx is None or voxel_counts is None:
+            return mmap_data[indices]
+        
+        # 计算每个网格的起始位置
+        cumsum = np.cumsum(np.insert(voxel_counts, 0, 0)).astype(np.int64)
+        
+        # 🔥 使用纳秒级时间戳作为种子，确保每次调用都有不同的随机数
+        # - time.time_ns() 在每次调用时几乎不可能相同（纳秒精度）
+        # - 不受 pl.seed_everything() 全局种子影响
+        # - 比 worker_init_fn 更可靠（worker_init_fn 只在 worker 启动时调用一次）
+        import time
+        rng = np.random.Generator(np.random.PCG64(time.time_ns()))
+        
+        n_grids = len(voxel_counts)
+        random_offsets = rng.integers(0, 2**31, size=n_grids, dtype=np.int32)
+        
+        # 使用 Numba 并行加速采样
+        sampled_local_indices = _grid_random_sample_parallel(
+            sort_idx.astype(np.int32), 
+            voxel_counts.astype(np.int32), 
+            cumsum,
+            random_offsets
+        )
+        
+        global_indices = indices[sampled_local_indices]
+        return mmap_data[global_indices]
+    
+    def _grid_modulo_sample(self, segment_info: dict, mmap_data: np.ndarray,
+                             loop_idx: int, points_per_loop: int = 1) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        对 segment 进行网格模运算采样 (用于 test/predict)
+        使用 Numba 加速
+        
+        Args:
+            segment_info: segment 元数据
+            mmap_data: 内存映射的 bin 数据
+            loop_idx: 当前采样轮次
+            points_per_loop: 每轮每体素采样点数
+            
+        Returns:
+            (采样后的结构化数组, 原始点索引)
+        """
+        indices = segment_info['indices']
+        sort_idx = segment_info.get('sort_idx', None)
+        voxel_counts = segment_info.get('voxel_counts', None)
+        
+        # 如果没有网格化信息，返回全部数据
+        if sort_idx is None or voxel_counts is None:
+            return mmap_data[indices], indices.copy()
+        
+        # 计算每个网格的起始位置
+        cumsum = np.cumsum(np.insert(voxel_counts, 0, 0)).astype(np.int64)
+        
+        # 使用 Numba 并行加速采样
+        sampled_local_indices = _grid_modulo_sample_parallel(
+            sort_idx.astype(np.int32),
+            voxel_counts.astype(np.int32),
+            cumsum,
+            loop_idx,
+            points_per_loop
+        )
+        
+        global_indices = indices[sampled_local_indices]
+        return mmap_data[global_indices], global_indices
     
     def _compute_h_norm(self, coord: np.ndarray, is_ground: np.ndarray, 
                        grid_resolution: float = 1.0) -> np.ndarray:
         """
         基于地面点标记计算归一化高程（地上高程）
-        
-        采用 TIN + Raster 混合方法（工业界标准）：
-        1. 使用 TIN 插值生成 DTM（数字地形模型）栅格
-        2. 通过快速栅格查询计算所有点的地面高程
-        3. 对 DTM 未覆盖区域使用 KNN 回退策略
-        
-        优势：
-        - 速度：栅格查询 O(1)，比 KNN 快得多
-        - 精度：TIN 插值保持地面点的几何精度
-        - 内存友好：栅格大小可控
-        
-        参数：
-            coord: [N, 3] 点云坐标 (X, Y, Z)
-            is_ground: [N,] 地面点标记，1 表示地面点，0 表示非地面点
-            grid_resolution: DTM 栅格分辨率（米），默认 0.5m
-                            更小的值 = 更精确但更慢、占用更多内存
-                            更大的值 = 更快但精度稍低
-            
-        返回：
-            h_norm: [N,] 归一化高程（地上高程），单位与输入坐标相同
         """
-        # 提取地面点
         ground_mask = (is_ground == 1)
         
-        # 如果没有地面点，返回相对于最低点的高度
         if not np.any(ground_mask):
             z_min = coord[:, 2].min()
             return (coord[:, 2] - z_min).astype(np.float32)
@@ -191,15 +486,10 @@ class BinPklDataset(DatasetBase):
         ground_z = ground_points[:, 2]
         n_ground = len(ground_points)
         
-        # 策略选择：根据地面点数量选择最优方法
-        
         if n_ground < 10:
-            # 地面点太少：使用全局最小值方法
             ground_z_base = ground_z.min()
             h_norm = coord[:, 2] - ground_z_base
-            
         elif n_ground < 50:
-            # 地面点很少：使用简单 KNN（不值得构建栅格）
             from scipy.spatial import cKDTree
             tree = cKDTree(ground_xy)
             k = min(3, n_ground)
@@ -213,9 +503,7 @@ class BinPklDataset(DatasetBase):
                 local_ground_z = (ground_z[indices] * weights).sum(axis=1)
             
             h_norm = coord[:, 2] - local_ground_z
-            
         else:
-            # 地面点足够：使用 TIN + Raster 混合方法（推荐）
             h_norm = self._compute_h_norm_tin_raster(
                 coord, ground_xy, ground_z, grid_resolution
             )
@@ -224,38 +512,18 @@ class BinPklDataset(DatasetBase):
     
     def _compute_h_norm_tin_raster(self, coord: np.ndarray, ground_xy: np.ndarray, 
                                    ground_z: np.ndarray, grid_resolution: float) -> np.ndarray:
-        """
-        使用 TIN + Raster 混合方法计算 h_norm（核心算法）
-        
-        步骤：
-        1. 用 scipy.interpolate.griddata 构建 TIN 并插值到规则栅格
-        2. 将所有点坐标映射到栅格索引
-        3. 快速查询栅格得到地面高程
-        4. 对 DTM 未覆盖区域（NaN）使用 KNN 回退
-        
-        参数：
-            coord: [N, 3] 所有点坐标
-            ground_xy: [M, 2] 地面点 XY 坐标
-            ground_z: [M,] 地面点 Z 坐标
-            grid_resolution: DTM 栅格分辨率
-            
-        返回：
-            h_norm: [N,] 归一化高程
-        """
+        """使用 TIN + Raster 混合方法计算 h_norm"""
         from scipy.interpolate import griddata
+        from scipy.spatial import cKDTree
         
-        # ===== 步骤 1: 定义 DTM 栅格 =====
         x_min, y_min = coord[:, :2].min(axis=0)
         x_max, y_max = coord[:, :2].max(axis=0)
         
-        # 计算栅格大小（向上取整）
         n_x = int(np.ceil((x_max - x_min) / grid_resolution)) + 1
         n_y = int(np.ceil((y_max - y_min) / grid_resolution)) + 1
         
-        # 限制栅格大小（防止内存爆炸）
-        MAX_GRID_SIZE = 2000  # 最大 2000x2000 = 400 万格子
+        MAX_GRID_SIZE = 2000
         if n_x > MAX_GRID_SIZE or n_y > MAX_GRID_SIZE:
-            # 动态调整分辨率
             grid_resolution = max(
                 (x_max - x_min) / MAX_GRID_SIZE,
                 (y_max - y_min) / MAX_GRID_SIZE
@@ -263,45 +531,25 @@ class BinPklDataset(DatasetBase):
             n_x = int(np.ceil((x_max - x_min) / grid_resolution)) + 1
             n_y = int(np.ceil((y_max - y_min) / grid_resolution)) + 1
         
-        # 创建规则栅格
         grid_x = np.linspace(x_min, x_max, n_x)
         grid_y = np.linspace(y_min, y_max, n_y)
         grid_xx, grid_yy = np.meshgrid(grid_x, grid_y)
         
-        # ===== 步骤 2: TIN 插值生成 DTM =====
-        # 使用 'linear' 方法（Delaunay 三角网）
-        # 'cubic' 更平滑但更慢，'nearest' 最快但质量差
         dtm_grid = griddata(
-            ground_xy,           # 稀疏地面点 XY
-            ground_z,            # 稀疏地面点 Z
-            (grid_xx, grid_yy),  # 目标栅格
-            method='linear',     # TIN 方法
-            fill_value=np.nan    # 无法插值区域填充 NaN
+            ground_xy, ground_z, (grid_xx, grid_yy),
+            method='linear', fill_value=np.nan
         )
         
-        # ===== 步骤 3: 计算所有点的栅格索引 =====
-        # 将真实坐标映射到栅格索引
         indices_x = ((coord[:, 0] - x_min) / grid_resolution).astype(int)
         indices_y = ((coord[:, 1] - y_min) / grid_resolution).astype(int)
-        
-        # 防止索引越界（边界点可能超出）
         indices_x = np.clip(indices_x, 0, dtm_grid.shape[1] - 1)
         indices_y = np.clip(indices_y, 0, dtm_grid.shape[0] - 1)
         
-        # ===== 步骤 4: 快速栅格查询 =====
-        # 注意：meshgrid 创建的数组是 (n_y, n_x) 形状
         z_ground = dtm_grid[indices_y, indices_x]
         
-        # ===== 步骤 5: 处理 DTM 未覆盖区域（NaN） =====
         nan_mask = np.isnan(z_ground)
-        
         if np.any(nan_mask):
-            # DTM 未覆盖的点（通常在边界或地面点稀疏区域）
-            # 使用 KNN 回退策略：查询最近的地面点
-            from scipy.spatial import cKDTree
-            
             tree = cKDTree(ground_xy)
-            # 对 NaN 点查询最近的 3 个地面点
             k = min(3, len(ground_xy))
             nan_points = coord[nan_mask, :2]
             
@@ -310,57 +558,28 @@ class BinPklDataset(DatasetBase):
                 z_ground[nan_mask] = ground_z[indices]
             else:
                 distances, indices = tree.query(nan_points, k=k)
-                # 距离加权平均
                 weights = 1.0 / (distances + 1e-8)
                 weights = weights / weights.sum(axis=1, keepdims=True)
                 z_ground[nan_mask] = (ground_z[indices] * weights).sum(axis=1)
         
-        # ===== 步骤 6: 计算归一化高程 =====
-        h_norm = coord[:, 2] - z_ground
-        
-        return h_norm
+        return coord[:, 2] - z_ground
     
     def _load_data(self, idx: int) -> Dict[str, Any]:
         """
         加载特定的数据样本
-        
-        重要：此方法返回的数据字典中各个特征（coord、intensity、color 等）是独立的，
-        不会预先拼接成 feature。这样 transforms.py 中的数据增强才能正确处理各个特征。
-        最终的 feature 拼接应该在 transforms 之后通过 Collect 变换完成。
-        
-        参数：
-            idx: 要加载的样本索引
-            
-        返回：
-            包含加载数据的字典，包括：
-            - coord: [N, 3] 坐标（必需）
-            - intensity: [N,] 强度值（如果在 assets 中）
-            - color: [N, 3] RGB 颜色，范围 [0, 255]（如果在 assets 中）
-            - echo: [N, 2] 回波信息，范围 [-1, 1]（如果在 assets 中）
-                - 第 0 列：是否首次回波
-                - 第 1 列：是否末次回波
-            - normal: [N, 3] 法向量（如果在 assets 中）
-            - h_norm: [N,] 高度归一化值（如果在 assets 中）
-            - class: [N,] 分类标签（如果在 assets 中）
-            - indices: [N,] 原始点索引（仅在 test/predict split 中）
         """
         sample_info = self.data_list[idx]
         
-        # 获取路径
-        bin_path = Path(sample_info['bin_path'])
+        bin_path = sample_info['bin_path']
+        pkl_path = sample_info['pkl_path']
         segment_id = sample_info['segment_id']
+        loop_idx = sample_info.get('loop_idx', None)
+        points_per_loop = sample_info.get('points_per_loop', 1)
         
-        # 加载 pkl 元数据（使用缓存避免重复磁盘 I/O）
-        pkl_path = Path(sample_info['pkl_path'])
-        pkl_key = str(pkl_path)
+        # 获取元数据
+        metadata = self._get_metadata(pkl_path)
         
-        if pkl_key not in self._metadata_cache:
-            with open(pkl_path, 'rb') as f:
-                self._metadata_cache[pkl_key] = pickle.load(f)
-        
-        metadata = self._metadata_cache[pkl_key]
-        
-        # 查找片段信息
+        # 查找 segment 信息
         segment_info = None
         for seg in metadata['segments']:
             if seg['segment_id'] == segment_id:
@@ -368,41 +587,64 @@ class BinPklDataset(DatasetBase):
                 break
         
         if segment_info is None:
-            raise ValueError(f"在 {pkl_path} 中未找到片段 {segment_id}")
+            raise ValueError(f"在 {pkl_path} 中未找到 segment {segment_id}")
         
-        # 使用 memmap 从 bin 文件加载点数据
-        point_data = np.memmap(bin_path, dtype=metadata['dtype'], mode='r')
+        # 获取 memmap 数据
+        mmap_data = self._get_mmap(bin_path, metadata['dtype'])
         
-        # 使用离散索引提取片段点
-        # 点云数据始终使用离散索引（非连续）
-        if 'indices' not in segment_info:
-            raise ValueError(f"片段信息必须包含 'indices' 字段")
+        # 根据模式和 split 采样数据
+        original_indices = None
         
-        indices = segment_info['indices']
-        segment_points = point_data[indices]
+        if self.mode == 'full':
+            # 全量模式
+            indices = segment_info['indices']
+            segment_points = mmap_data[indices]
+            if self.split in ['test', 'predict']:
+                original_indices = indices.copy()
+                
+        elif self.mode == 'grid':
+            if self.split in ['train', 'val']:
+                # 随机采样
+                segment_points = self._grid_random_sample(segment_info, mmap_data)
+            else:
+                # 模运算采样
+                segment_points, original_indices = self._grid_modulo_sample(
+                    segment_info, mmap_data, loop_idx, points_per_loop
+                )
+        else:
+            raise ValueError(f"未知模式: {self.mode}")
         
         # 提取请求的资产
-        # 注意：不在这里拼接 feature，而是保持各个特征独立
-        # 这样 transforms.py 中的数据增强可以分别处理 intensity、color 等
-        # 最后通过 Collect 变换来拼接所有特征
         data = {}
         
-        # 总是首先提取 coord
+        # 🔥 坐标：转换为局部坐标以保持 float32 精度
+        # 原始坐标为 float64（如 508000.0, 5443500.0），直接转 float32 会丢失精度
+        # 使用局部坐标（减去 local_min）后，坐标范围通常在 0~50m 内，float32 足够精确
+        local_min = segment_info.get('local_min', None)
+        
         coord = np.stack([
             segment_points['X'],
             segment_points['Y'],
             segment_points['Z']
-        ], axis=1).astype(np.float32)
+        ], axis=1)  # 保持 float64
+        
+        if local_min is not None:
+            # 转换为局部坐标
+            coord = coord - local_min.astype(np.float64)
+        
+        coord = coord.astype(np.float32)
         data['coord'] = coord
         
-        # 根据资产顺序提取其他特征（保持独立，不拼接）
+        # 保存原始坐标偏移量（用于预测时恢复全局坐标）
+        if self.split in ['test', 'predict'] and local_min is not None:
+            data['coord_offset'] = local_min.astype(np.float64)
+        
+        # 其他资产
         for asset in self.assets:
             if asset == 'coord':
-                continue  # 已处理
+                continue
                 
             elif asset == 'intensity':
-                # 提取原始强度值（保持原始位数，不归一化）
-                # 归一化应在 transforms 中完成，如 AutoNormalizeIntensity
                 if 'intensity' not in segment_points.dtype.names:
                     raise ValueError(
                         f"请求的属性 'intensity' 在数据中不存在。\n"
@@ -410,11 +652,11 @@ class BinPklDataset(DatasetBase):
                         f"请检查 assets 配置或数据文件。"
                     )
                 intensity = segment_points['intensity'].astype(np.float32)
-                data['intensity'] = intensity  # [N,]
-                
+                # 归一化到 [0, 1]
+                intensity = intensity / 65535.0
+                data['intensity'] = intensity
+                    
             elif asset == 'color':
-                # 提取原始 RGB 颜色值（保持原始位数，不归一化）
-                # 归一化应在 transforms 中完成，如 AutoNormalizeColor
                 required_fields = ['red', 'green', 'blue']
                 missing = [f for f in required_fields if f not in segment_points.dtype.names]
                 if missing:
@@ -428,10 +670,9 @@ class BinPklDataset(DatasetBase):
                     segment_points['green'],
                     segment_points['blue']
                 ], axis=1).astype(np.float32)
-                data['color'] = color  # [N, 3]
+                data['color'] = color
 
             elif asset == 'echo':
-                # 提取回波信息
                 required_fields = ['return_number', 'number_of_returns']
                 missing = [f for f in required_fields if f not in segment_points.dtype.names]
                 if missing:
@@ -440,16 +681,15 @@ class BinPklDataset(DatasetBase):
                         f"可用字段: {list(segment_points.dtype.names)}\n"
                         f"请检查 assets 配置或数据文件。"
                     )
-                is_first = (segment_points['return_number'] == 1).astype(np.float32)
-                is_last = (segment_points['return_number'] == segment_points['number_of_returns']).astype(np.float32)
-                # 转换为 [-1, 1] 范围：True -> 1, False -> -1
-                is_first = is_first * 2.0 - 1.0
-                is_last = is_last * 2.0 - 1.0
-                echo = np.stack([is_first, is_last], axis=1)  # [N, 2]
-                data['echo'] = echo  # [N, 2]
+                return_number = segment_points['return_number'].astype(np.float32)
+                number_of_returns = segment_points['number_of_returns'].astype(np.float32)
+                echo = np.stack([
+                    (return_number == 1).astype(np.float32) * 2 - 1,
+                    (return_number == number_of_returns).astype(np.float32) * 2 - 1,
+                ], axis=1)
+                data['echo'] = echo
 
             elif asset == 'normal':
-                # 提取法向量
                 required_fields = ['normal_x', 'normal_y', 'normal_z']
                 missing = [f for f in required_fields if f not in segment_points.dtype.names]
                 if missing:
@@ -463,125 +703,90 @@ class BinPklDataset(DatasetBase):
                     segment_points['normal_y'],
                     segment_points['normal_z']
                 ], axis=1).astype(np.float32)
-                data['normal'] = normal  # [N, 3]
+                data['normal'] = normal
 
             elif asset == 'h_norm':
-                # 计算归一化高程（地上高程）
-                # 如果 bin 文件中已有预计算的 h_norm，直接使用
-                if 'h_norm' in segment_points.dtype.names:
-                    h_norm = segment_points['h_norm'].astype(np.float32)
-                # 否则，基于 is_ground 字段动态计算
-                elif 'is_ground' in segment_points.dtype.names:
-                    h_norm = self._compute_h_norm(coord, segment_points['is_ground'], self.h_norm_grid)
+                if 'is_ground' in segment_points.dtype.names:
+                    is_ground = segment_points['is_ground']
+                    h_norm = self._compute_h_norm(coord, is_ground, self.h_norm_grid)
+                    data['h_norm'] = h_norm
                 else:
-                    raise ValueError("既没有 'h_norm' 也没有 'is_ground' 字段，无法计算归一化高程")
-                data['h_norm'] = h_norm
+                    raise ValueError(
+                        f"请求的属性 'h_norm' 所需字段 'is_ground' 在数据中不存在。\n"
+                        f"可用字段: {list(segment_points.dtype.names)}\n"
+                        f"请检查 assets 配置或数据文件。"
+                    )
 
             elif asset == 'class':
-                # 单独存储分类标签为目标
                 if 'classification' not in segment_points.dtype.names:
                     raise ValueError(
                         f"请求的属性 'class' 所需字段 'classification' 在数据中不存在。\n"
                         f"可用字段: {list(segment_points.dtype.names)}\n"
                         f"请检查 assets 配置或数据文件。"
                     )
-                classification = segment_points['classification'].astype(np.int64)
-                
-                # 如果提供了类别映射则应用
+                labels = segment_points['classification'].astype(np.int64)
+                # 应用类别映射
                 if self.class_mapping is not None:
-                    # 🔥 新策略：不在 class_mapping 中的类别设为 ignore_label
-                    # 这些点会参与网络前向传播（保持数据连续性），
-                    # 但不参与损失计算和精度评估（通过 ignore_index 机制）
-                    
-                    # 初始化所有标签为 ignore_label
-                    mapped_classification = np.full_like(classification, self.ignore_label, dtype=np.int64)
-                    
-                    # 只映射 class_mapping 中定义的类别
-                    for original_label, new_label in self.class_mapping.items():
-                        mask = (classification == original_label)
-                        mapped_classification[mask] = new_label
-                    
-                    data['class'] = mapped_classification
-                else:
-                    data['class'] = classification
+                    mapped_labels = np.full_like(labels, self.ignore_label)
+                    for orig_label, new_label in self.class_mapping.items():
+                        mapped_labels[labels == orig_label] = new_label
+                    labels = mapped_labels
+                data['class'] = labels
 
-        # 在 test 和 predict 划分中，存储点索引用于投票机制
+        # test/predict 时存储索引信息
         if self.split in ['test', 'predict']:
-            data['indices'] = indices.copy()  # 存储原始点索引
-            
-            # 🔥 新增：直接传递文件信息，避免在 callback 中推断
-            # 这些信息在 tile.py 中已经保存到 segment_info 中
-            data['bin_file'] = sample_info.get('bin_file', Path(sample_info['bin_path']).stem)
-            data['bin_path'] = sample_info['bin_path']
-            data['pkl_path'] = sample_info['pkl_path']
+            if original_indices is not None:
+                data['indices'] = original_indices
+            data['bin_file'] = sample_info.get('file_name', Path(bin_path).stem)
+            data['bin_path'] = bin_path
+            data['pkl_path'] = pkl_path
+            data['segment_id'] = segment_id
+            if loop_idx is not None:
+                data['loop_idx'] = loop_idx
         
         return data
     
     def get_segment_info(self, idx: int) -> Dict[str, Any]:
-        """
-        获取特定片段的元数据
-        
-        参数：
-            idx: 片段的索引
-            
-        返回：
-            包含片段元数据的字典
-        """
+        """获取特定片段的元数据"""
         if idx < 0 or idx >= len(self.data_list):
             raise IndexError(f"索引 {idx} 超出范围 [0, {len(self.data_list)})")
         
         sample_info = self.data_list[idx]
-        pkl_path = Path(sample_info['pkl_path'])
-        
-        with open(pkl_path, 'rb') as f:
-            metadata = pickle.load(f)
-        
-        # 查找片段信息
+        pkl_path = sample_info['pkl_path']
         segment_id = sample_info['segment_id']
+        
+        metadata = self._get_metadata(pkl_path)
+        
         for seg in metadata['segments']:
             if seg['segment_id'] == segment_id:
                 return seg
         
-        raise ValueError(f"未找到片段 {segment_id}")
+        raise ValueError(f"未找到 segment {segment_id}")
     
     def get_file_metadata(self, idx: int) -> Dict[str, Any]:
-        """
-        获取包含特定片段的文件的元数据
-        
-        参数：
-            idx: 片段的索引
-            
-        返回：
-            包含文件级元数据的字典
-        """
+        """获取包含特定片段的文件的元数据"""
         if idx < 0 or idx >= len(self.data_list):
             raise IndexError(f"索引 {idx} 超出范围 [0, {len(self.data_list)})")
         
         sample_info = self.data_list[idx]
-        pkl_path = Path(sample_info['pkl_path'])
+        pkl_path = sample_info['pkl_path']
         
-        with open(pkl_path, 'rb') as f:
-            metadata = pickle.load(f)
+        metadata = self._get_metadata(pkl_path)
         
-        # 返回元数据，排除片段列表（可能很大）
-        file_metadata = {k: v for k, v in metadata.items() if k != 'segments'}
-        return file_metadata
+        return {k: v for k, v in metadata.items() if k != 'segments'}
     
     def get_stats(self) -> Dict[str, Any]:
-        """
-        获取数据集统计信息
-        
-        返回：
-            包含数据集统计信息的字典
-        """
+        """获取数据集统计信息"""
         if len(self.data_list) == 0:
             return {}
         
-        # 收集统计信息
         num_points_list = [s['num_points'] for s in self.data_list]
+        num_voxels_list = [s.get('num_voxels', 0) for s in self.data_list]
         
         stats = {
             'num_samples': len(self.data_list),
+            'mode': self.mode,
+            'split': self.split,
             'num_points': {
                 'total': sum(num_points_list),
                 'mean': np.mean(num_points_list),
@@ -589,17 +794,13 @@ class BinPklDataset(DatasetBase):
                 'min': np.min(num_points_list),
                 'max': np.max(num_points_list),
                 'std': np.std(num_points_list),
+            },
+            'num_voxels': {
+                'mean': np.mean(num_voxels_list) if num_voxels_list else 0,
+                'min': np.min(num_voxels_list) if num_voxels_list else 0,
+                'max': np.max(num_voxels_list) if num_voxels_list else 0,
             }
         }
-        
-        # 从第一个文件获取标签分布
-        if len(self.data_list) > 0:
-            pkl_path = Path(self.data_list[0]['pkl_path'])
-            with open(pkl_path, 'rb') as f:
-                metadata = pickle.load(f)
-            
-            if 'label_counts' in metadata:
-                stats['label_distribution'] = metadata['label_counts']
         
         return stats
     
@@ -608,9 +809,10 @@ class BinPklDataset(DatasetBase):
         stats = self.get_stats()
         
         print("="*70)
-        print("数据集统计信息")
+        print(f"数据集统计信息 ({self.__class__.__name__})")
         print("="*70)
         print(f"划分: {self.split}")
+        print(f"模式: {self.mode}")
         print(f"样本数: {stats['num_samples']:,}")
         print(f"\n每样本点数:")
         print(f"  - 总计: {stats['num_points']['total']:,}")
@@ -618,128 +820,128 @@ class BinPklDataset(DatasetBase):
         print(f"  - 中位数: {stats['num_points']['median']:,.0f}")
         print(f"  - 最小: {stats['num_points']['min']:,}")
         print(f"  - 最大: {stats['num_points']['max']:,}")
-        print(f"  - 标准差: {stats['num_points']['std']:,.1f}")
-        
-        if 'label_distribution' in stats:
-            print(f"\n标签分布（整体）:")
-            for label, count in sorted(stats['label_distribution'].items()):
-                print(f"  类别 {label}: {count:,}")
-        
+        if self.mode == 'grid':
+            print(f"\n网格数:")
+            print(f"  - 平均: {stats['num_voxels']['mean']:,.1f}")
+            print(f"  - 最小: {stats['num_voxels']['min']:,}")
+            print(f"  - 最大: {stats['num_voxels']['max']:,}")
         print("="*70)
     
     def get_class_distribution(self) -> Optional[Dict[int, int]]:
-        """
-        获取数据集的类别分布
-        
-        返回：
-            类别分布字典 {class_id: count}
-        """
+        """获取数据集的类别分布（累加所有文件）"""
         if len(self.data_list) == 0:
             return {}
         
-        # 从第一个 pkl 文件获取整体类别分布
-        pkl_path = Path(self.data_list[0]['pkl_path'])
-        with open(pkl_path, 'rb') as f:
-            metadata = pickle.load(f)
+        # 收集所有唯一的 pkl 文件
+        pkl_paths = set(s['pkl_path'] for s in self.data_list)
         
-        if 'label_counts' in metadata:
-            # 如果有 class_mapping，转换类别标签
-            if self.class_mapping is not None:
-                mapped_counts = {}
-                for original_label, count in metadata['label_counts'].items():
-                    if original_label in self.class_mapping:
-                        new_label = self.class_mapping[original_label]
-                        mapped_counts[new_label] = mapped_counts.get(new_label, 0) + count
-                return mapped_counts
-            else:
-                return dict(metadata['label_counts'])
+        # 累加所有文件的类别分布
+        total_counts = {}
+        for pkl_path in pkl_paths:
+            metadata = self._get_metadata(pkl_path)
+            if 'label_counts' in metadata:
+                for label, count in metadata['label_counts'].items():
+                    total_counts[label] = total_counts.get(label, 0) + count
         
-        return {}
+        if not total_counts:
+            return {}
+        
+        # 应用类别映射
+        if self.class_mapping is not None:
+            mapped_counts = {}
+            for orig_label, count in total_counts.items():
+                if orig_label in self.class_mapping:
+                    new_label = self.class_mapping[orig_label]
+                    mapped_counts[new_label] = mapped_counts.get(new_label, 0) + count
+            return mapped_counts
+        else:
+            return total_counts
     
     def get_sample_weights(self, class_weights: Optional[Dict[int, float]] = None) -> Optional[np.ndarray]:
         """
-        计算每个样本（segment）的权重
+        计算每个样本的权重（用于 WeightedRandomSampler）
         
         权重计算策略：
         - 样本权重 = Σ(样本中包含的每个类别的类别权重)
         - 包含稀有类别的样本获得更高权重
         - 包含多个不同类别的样本获得更高权重
         
-        参数：
+        Args:
             class_weights: 类别权重字典 {class_id: weight}
-        
-        返回：
+            
+        Returns:
             样本权重数组 [num_samples]
         """
         if class_weights is None or len(self.data_list) == 0:
             return None
         
-        # 加载 pkl 元数据获取每个 segment 的类别信息
-        sample_weights = []
+        weights = np.zeros(len(self.data_list), dtype=np.float32)
         
-        # 按 pkl 文件分组处理（避免重复加载）
-        pkl_to_samples = {}
-        for idx, sample_info in enumerate(self.data_list):
+        for i, sample_info in enumerate(self.data_list):
             pkl_path = sample_info['pkl_path']
-            if pkl_path not in pkl_to_samples:
-                pkl_to_samples[pkl_path] = []
-            pkl_to_samples[pkl_path].append((idx, sample_info['segment_id']))
-        
-        # 为每个 pkl 文件计算其 segments 的权重
-        weights_dict = {}
-        for pkl_path, samples in pkl_to_samples.items():
-            with open(pkl_path, 'rb') as f:
-                metadata = pickle.load(f)
+            segment_id = sample_info['segment_id']
             
-            # 为每个 segment 计算权重
-            for idx, segment_id in samples:
-                segment_info = None
-                for seg in metadata['segments']:
-                    if seg['segment_id'] == segment_id:
-                        segment_info = seg
-                        break
-                
-                unique_labels = None
-                if segment_info is not None and 'unique_labels' in segment_info:
-                    unique_labels = segment_info['unique_labels']
-                else:
-                    # 如果没有类别信息，尝试从 bin 文件加载
-                    # 这会增加初始化时间，但能保证权重正确
-                    try:
-                        bin_path = Path(segment_info['bin_path'])
-                        if bin_path.exists():
-                            # 只读取 classification 字段
-                            point_data = np.memmap(bin_path, dtype=metadata['dtype'], mode='r')
-                            indices = segment_info['indices']
-                            segment_points = point_data[indices]
-                            unique_labels = np.unique(segment_points['classification'])
-                    except Exception as e:
-                        # print(f"无法加载 segment {segment_id} 的类别信息: {e}")
-                        pass
-
-                if unique_labels is None:
-                    # 如果仍然无法获取，使用默认权重 1.0
-                    weights_dict[idx] = 1.0
-                    continue
-                
+            # 获取元数据
+            metadata = self._get_metadata(pkl_path)
+            
+            # 查找对应的 segment
+            segment_info = None
+            for seg in metadata['segments']:
+                if seg['segment_id'] == segment_id:
+                    segment_info = seg
+                    break
+            
+            if segment_info is None:
+                weights[i] = 1.0
+                continue
+            
+            # 🔥 优先使用 unique_labels（包含的类别列表）
+            unique_labels = segment_info.get('unique_labels', None)
+            
+            if unique_labels is not None and len(unique_labels) > 0:
                 # 计算权重：包含的所有类别的类别权重之和
-                segment_weight = 0.0
-                
+                sample_weight = 0.0
                 for label in unique_labels:
-                    # 如果有 class_mapping，先映射标签
                     if self.class_mapping is not None:
                         if label in self.class_mapping:
                             mapped_label = self.class_mapping[label]
-                            segment_weight += class_weights.get(mapped_label, 0.0)
+                            sample_weight += class_weights.get(mapped_label, 0.0)
                     else:
-                        segment_weight += class_weights.get(label, 0.0)
-                
-                weights_dict[idx] = max(segment_weight, 1e-6)  # 避免零权重
+                        sample_weight += class_weights.get(int(label), 0.0)
+                weights[i] = max(sample_weight, 1e-6)
+            else:
+                # 如果没有 unique_labels，尝试从 label_counts 获取
+                label_counts = segment_info.get('label_counts', {})
+                if label_counts:
+                    sample_weight = 0.0
+                    for orig_label in label_counts.keys():
+                        if self.class_mapping is not None:
+                            if orig_label in self.class_mapping:
+                                mapped_label = self.class_mapping[orig_label]
+                                sample_weight += class_weights.get(mapped_label, 0.0)
+                        else:
+                            sample_weight += class_weights.get(int(orig_label), 0.0)
+                    weights[i] = max(sample_weight, 1e-6)
+                else:
+                    weights[i] = 1.0
         
-        # 按顺序构建权重数组
-        sample_weights = np.array([weights_dict.get(i, 1.0) for i in range(len(self.data_list))], dtype=np.float32)
+        return weights
+    
+    def get_sample_num_points(self) -> List[int]:
+        """
+        获取每个样本的点数列表（用于 DynamicBatchSampler）
         
-        return sample_weights
+        注意：在 grid 模式下，返回的是网格数（采样后的点数）
+        """
+        if self.mode == 'grid':
+            # 网格模式：采样后的点数 = 网格数 × points_per_loop
+            return [
+                s.get('num_voxels', s['num_points']) * s.get('points_per_loop', 1)
+                for s in self.data_list
+            ]
+        else:
+            # 全量模式：原始点数
+            return [s['num_points'] for s in self.data_list]
 
 
 def create_dataset(
@@ -749,24 +951,23 @@ def create_dataset(
     transform=None,
     ignore_label=-1,
     loop=1,
-    cache_data=False,
+    mode='grid',
+    max_loops=None,
     **kwargs
 ):
     """
     创建 BinPklDataset 的工厂函数
     
-    参数：
-        data_root: 根目录、单个 pkl 文件或 pkl 文件列表
-        split: 数据集划分（'train'、'val'、'test'、'predict'）
-        assets: 要加载的数据属性列表
+    Args:
+        data_root: 数据根目录
+        split: 数据集划分
+        assets: 要加载的资产列表
         transform: 数据变换
-        ignore_label: 要忽略的标签
-        loop: 数据集循环因子
-        cache_data: 是否缓存数据
+        ignore_label: 忽略的标签值
+        loop: 循环次数
+        mode: 采样模式 ('grid' 或 'full')
+        max_loops: 最大采样轮次
         **kwargs: 其他参数
-        
-    返回：
-        BinPklDataset 实例
     """
     return BinPklDataset(
         data_root=data_root,
@@ -775,6 +976,7 @@ def create_dataset(
         transform=transform,
         ignore_label=ignore_label,
         loop=loop,
-        cache_data=cache_data,
+        mode=mode,
+        max_loops=max_loops,
         **kwargs
     )

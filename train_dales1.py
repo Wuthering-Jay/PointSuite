@@ -1,4 +1,4 @@
-"""
+﻿"""
 DALES 数据集训练脚本 (逻辑索引格式 - tile_las1.py)
 
 适配新的 bin+pkl 逻辑索引数据格式：
@@ -35,51 +35,11 @@ warnings.filterwarnings("ignore", ".*does not have many workers.*")
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pointsuite.data import BinPklDataModule1
+from pointsuite.data import BinPklDataModule
 from pointsuite.data.transforms import *
 from pointsuite.tasks import SemanticSegmentationTask
 from pointsuite.utils.callbacks import SemanticPredictLasWriter1, AutoEmptyCacheCallback, TextLoggingCallback
-from pointsuite.utils.logger import setup_logger
-
-
-# ============================================================================
-# 美化输出辅助
-# ============================================================================
-
-class Colors:
-    """ANSI 颜色代码"""
-    HEADER = '\033[95m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    RED = '\033[91m'
-    BOLD = '\033[1m'
-    DIM = '\033[2m'
-    RESET = '\033[0m'
-
-
-def print_header(title: str, emoji: str = "🚀"):
-    """打印美化的标题"""
-    print()
-    print(f"{Colors.BOLD}{'═' * 70}{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.CYAN}  {emoji} {title}{Colors.RESET}")
-    print(f"{Colors.BOLD}{'═' * 70}{Colors.RESET}")
-
-
-def print_section(title: str):
-    """打印章节标题"""
-    print(f"\n{Colors.BOLD}{Colors.BLUE}{'─' * 50}{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.BLUE}  {title}{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.BLUE}{'─' * 50}{Colors.RESET}")
-
-
-def print_config(configs: dict, title: str = "配置"):
-    """打印配置信息"""
-    print_section(title)
-    max_key_len = max(len(str(k)) for k in configs.keys())
-    for key, value in configs.items():
-        print(f"  {Colors.DIM}├─{Colors.RESET} {key:<{max_key_len}}: {Colors.GREEN}{value}{Colors.RESET}")
+from pointsuite.utils.logger import setup_logger, Colors, print_header, print_section, print_config
 
 
 def main():
@@ -88,7 +48,7 @@ def main():
     # ========================================================================
     
     # 数据路径 (使用 tile_las1.py 生成的逻辑索引格式)
-    TRAIN_DATA = r"E:\data\DALES\dales_las\bin_logical\train"
+    TRAIN_DATA = r"E:\data\DALES\dales_las\bin_logical\test"
     VAL_DATA = r"E:\data\DALES\dales_las\bin_logical\test"   # 使用 test 作为验证
     TEST_DATA = r"E:\data\DALES\dales_las\bin_logical\test"
     PREDICT_DATA = r"E:\data\DALES\dales_las\bin_logical\test"
@@ -98,13 +58,16 @@ def main():
     log_file_path = setup_logger(OUTPUT_DIR)
     
     # 类别配置 (DALES 8类)
-    CLASS_MAPPING = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6, 8: 7}
+    # 🔥 支持两种格式：
+    #   - 列表形式：[1, 2, 3, 4, 5, 6, 7, 8] 自动映射为 [0, 1, 2, ..., 7]
+    #   - 字典形式：{1: 0, 2: 1, ...} 显式指定映射
+    CLASS_MAPPING = [1, 2, 3, 4, 5, 6, 7, 8]  # 等价于 {1:0, 2:1, 3:2, 4:3, 5:4, 6:5, 7:6, 8:7}
     CLASS_NAMES = ['地面', '植被', '车辆', '卡车', '电线', '篱笆', '杆状物', '建筑']
-    NUM_CLASSES = 8
+    NUM_CLASSES = len(CLASS_MAPPING)  # 自动计算类别数
     IGNORE_LABEL = -1
     
     # 训练配置
-    MAX_EPOCHS = 5
+    MAX_EPOCHS = 1
     BATCH_SIZE = 4 
     NUM_WORKERS = 4
     LEARNING_RATE = 1e-3
@@ -112,13 +75,29 @@ def main():
     # 🔥 内存优化：禁用 persistent_workers 避免多进程缓存复制
     # 每个 worker 进程会复制 dataset 对象，包括其中的缓存
     # persistent_workers=True 会让这些进程常驻，累积大量内存
-    PERSISTENT_WORKERS = False
+    PERSISTENT_WORKERS = True
     
     # 体素模式配置
-    MODE = 'voxel'           # 'voxel' 或 'full'
-    MAX_LOOPS = 10           # test/predict 时最大采样轮数 (None = 按最大体素密度)
-    MAX_POINTS = 150000      # 每批次最大点数 (体素模式下 = 体素数)
-    MAX_POINTS_INFERENCE = 150000  # 推理时更大批次
+    MODE = 'grid'           # 'grid' 或 'full'
+    MAX_LOOPS = None         # test/predict 时最大采样轮数 (None = 每轮1点，和训练时一致)
+    MAX_POINTS = 125000     # 每批次最大点数 (体素模式下 = 体素数)
+    MAX_POINTS_INFERENCE = 125000  # 推理时批次点数
+    
+    # ========================================================================
+    # 🔥 运行模式配置
+    # ========================================================================
+    # RUN_MODE 控制运行流程：
+    #   'train'    : 从头训练 → 验证 → 测试 → 预测
+    #   'resume'   : 从 checkpoint 继续训练 → 验证 → 测试 → 预测 (恢复 optimizer/epoch 状态)
+    #   'finetune' : 加载预训练权重，从头训练 → 验证 → 测试 → 预测 (只加载模型权重)
+    #   'test'     : 跳过训练，直接 测试 → 预测
+    # 
+    RUN_MODE = 'train'  # 'train' | 'resume' | 'finetune' | 'test'
+    
+    # checkpoint 路径 (用于 resume/finetune/test 模式)
+    CKPT_PATH = r"E:\code\PointSuite\outputs\dales1\checkpoints\dales1-epoch=09-mean_iou=0.7765.ckpt"
+    # CKPT_PATH = None
+    # 示例: CKPT_PATH = r"E:\code\PointSuite\outputs\dales1\checkpoints\dales1-epoch=05-mean_iou=0.7830.ckpt"
     
     # 梯度累积
     ACCUMULATE_GRAD_BATCHES = 2
@@ -170,20 +149,32 @@ def main():
         RandomScale(scale=[0.9, 1.1]),
         RandomFlip(p=0.5),
         RandomJitter(sigma=0.005, clip=0.02),
+        # GridSample(grid_size=0.5,hash_type='fnv',mode='train'),
         Collect(keys=['coord', 'class'],
                 feat_keys={'feat': ['coord', 'echo']}),
         ToTensor(),
     ]
     
     val_transforms = [
-        CenterShift(),
+        CenterShift(),  # 中心化坐标 (在局部坐标系下)
+        RandomDropout(dropout_ratio=0.2, p=0.5),
+        RandomRotate(angle=[-1, 1], axis='z', p=0.5),
+        RandomScale(scale=[0.9, 1.1]),
+        RandomFlip(p=0.5),
+        RandomJitter(sigma=0.005, clip=0.02),
+        # GridSample(grid_size=0.5,hash_type='fnv',mode='train'),
         Collect(keys=['coord', 'class'],
                 feat_keys={'feat': ['coord', 'echo']}),
         ToTensor(),
     ]
     
-    test_transforms = val_transforms.copy()
-    
+    test_transforms = [
+        CenterShift(),
+        Collect(keys=['coord', 'class'],
+                feat_keys={'feat': ['coord', 'echo']}),
+        ToTensor(),
+    ]
+
     # 预测时需要保留更多信息
     predict_transforms = [
         CenterShift(),
@@ -198,12 +189,12 @@ def main():
     
     print_section("📦 初始化 DataModule")
     
-    datamodule = BinPklDataModule1(
+    datamodule = BinPklDataModule(
         train_data=TRAIN_DATA,
         val_data=VAL_DATA,
         test_data=TEST_DATA,
         predict_data=PREDICT_DATA,
-        assets=['coord', 'echo', 'class'],
+        assets=['coord', 'class', 'echo'],
         class_mapping=CLASS_MAPPING,
         class_names=CLASS_NAMES,
         ignore_label=IGNORE_LABEL,
@@ -216,7 +207,6 @@ def main():
         # 🔥 逻辑索引格式特有配置
         mode=MODE,
         max_loops=MAX_LOOPS,
-        h_norm_grid=1.0,
         
         # 动态批次
         use_dynamic_batch=True,
@@ -228,8 +218,8 @@ def main():
         use_weighted_sampler=True,
         
         # 循环配置
-        train_loop=1,
-        val_loop=1,
+        train_loop=5,
+        val_loop=5,
         test_loop=1,
         predict_loop=1,
         
@@ -310,12 +300,18 @@ def main():
             },
             "weight": 1.0,
         },
-        {
-            "name": "lac_loss",
-            "class_path": "pointsuite.models.losses.LACLoss",
-            "init_args": {"k_neighbors": 16, "ignore_index": IGNORE_LABEL},
-            "weight": 1.0,
-        },
+        # {
+        #     "name": "lac_loss",
+        #     "class_path": "pointsuite.models.losses.LACLoss",
+        #     "init_args": {"k_neighbors": 16, "ignore_index": IGNORE_LABEL},
+        #     "weight": 1.0,
+        # },
+        # {
+        #     "name": "lovasz_loss",
+        #     "class_path": "pointsuite.models.losses.LovaszLoss",
+        #     "init_args": {"ignore_index": IGNORE_LABEL, "mode": "multiclass"},
+        #     "weight": 1.0,
+        # }
     ]
     
     # 指标配置
@@ -446,16 +442,32 @@ def main():
     # 训练流程
     # ========================================================================
     
-    # 断点恢复配置
-    ckpt_path = None
-    pretrained_path = None
+    print_section(f"🚀 运行模式: {RUN_MODE.upper()}")
     
-    # 加载预训练权重 (如果指定)
-    if pretrained_path is not None and ckpt_path is None:
-        print_section("📥 加载预训练权重")
-        print(f"  路径: {pretrained_path}")
+    # 根据 RUN_MODE 决定流程
+    if RUN_MODE == 'train':
+        # 从头训练
+        print(f"  从头开始训练")
+        print_header("开始训练", "🏋️")
+        trainer.fit(task, datamodule)
+        best_ckpt = "best"
         
-        checkpoint = torch.load(pretrained_path, map_location='cpu', weights_only=False)
+    elif RUN_MODE == 'resume':
+        # 从 checkpoint 继续训练 (恢复 optimizer/epoch 状态)
+        if CKPT_PATH is None:
+            raise ValueError("RUN_MODE='resume' 时必须指定 CKPT_PATH")
+        print(f"  从 checkpoint 继续训练: {Colors.CYAN}{CKPT_PATH}{Colors.RESET}")
+        print_header("继续训练", "🏋️")
+        trainer.fit(task, datamodule, ckpt_path=CKPT_PATH)
+        best_ckpt = "best"
+        
+    elif RUN_MODE == 'finetune':
+        # 加载预训练权重，从头训练
+        if CKPT_PATH is None:
+            raise ValueError("RUN_MODE='finetune' 时必须指定 CKPT_PATH")
+        print(f"  加载预训练权重: {Colors.CYAN}{CKPT_PATH}{Colors.RESET}")
+        
+        checkpoint = torch.load(CKPT_PATH, map_location='cpu', weights_only=False)
         state_dict = checkpoint['state_dict']
         
         new_state_dict = {}
@@ -467,27 +479,37 @@ def main():
                 
         missing_keys, unexpected_keys = task.load_state_dict(new_state_dict, strict=False)
         if missing_keys:
-            print(f"  {Colors.YELLOW}缺失的键: {missing_keys[:5]} ...{Colors.RESET}")
+            print(f"  {Colors.YELLOW}缺失的键: {missing_keys[:5]}...{Colors.RESET}")
         if unexpected_keys:
-            print(f"  {Colors.YELLOW}未预期的键: {unexpected_keys[:5]} ...{Colors.RESET}")
+            print(f"  {Colors.YELLOW}未预期的键: {unexpected_keys[:5]}...{Colors.RESET}")
         print(f"  {Colors.GREEN}✓ 权重加载完成{Colors.RESET}")
-    
-    # ---------- 训练 ----------
-    print_header("开始训练", "🏋️")
-    trainer.fit(task, datamodule, ckpt_path=ckpt_path)
+        
+        print_header("开始微调", "🏋️")
+        trainer.fit(task, datamodule)
+        best_ckpt = "best"
+        
+    elif RUN_MODE == 'test':
+        # 跳过训练，直接测试/预测
+        if CKPT_PATH is None:
+            raise ValueError("RUN_MODE='test' 时必须指定 CKPT_PATH")
+        print(f"  跳过训练，直接测试")
+        print(f"  使用 checkpoint: {Colors.CYAN}{CKPT_PATH}{Colors.RESET}")
+        best_ckpt = CKPT_PATH
+        
+    else:
+        raise ValueError(f"未知的 RUN_MODE: {RUN_MODE}，可选: 'train', 'resume', 'finetune', 'test'")
     
     # ---------- 测试 ----------
     if datamodule.test_data is not None:
         print_header("开始测试", "🧪")
-        trainer.test(task, datamodule)
+        trainer.test(task, datamodule, ckpt_path=best_ckpt)
     else:
         print_section("跳过测试 (未提供测试数据)")
     
     # ---------- 预测 ----------
     if datamodule.predict_data is not None:
         print_header("开始预测", "🔮")
-        # 使用最佳模型进行预测
-        trainer.predict(task, datamodule=datamodule, ckpt_path="best")
+        trainer.predict(task, datamodule=datamodule, ckpt_path=best_ckpt)
     else:
         print_section("跳过预测 (未提供预测数据)")
     

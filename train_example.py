@@ -67,7 +67,6 @@ def create_datamodule():
         # Dataset 参数
         assets=['coord', 'intensity', 'echo', 'h_norm', 'classification'],
         ignore_label=-1,
-        cache_data=False,
         
         # Loop 参数
         train_loop=1,

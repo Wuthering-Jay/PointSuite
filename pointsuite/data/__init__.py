@@ -6,18 +6,15 @@ PointSuite 数据模块
 
 主要组件：
 - DataModuleBase: 数据模块的抽象基类
-- BinPklDataModule: bin+pkl 格式数据集的 DataModule
-- BinPklDataModule1: bin+pkl 逻辑索引格式数据集的 DataModule (tile_las1.py)
+- BinPklDataModule: bin+pkl 逻辑索引格式数据集的 DataModule (tile_las.py)
 - PointDataModule: BinPklDataModule 的别名（向后兼容）
-- BinPklDataset: bin+pkl 格式的数据集
-- BinPklDataset1: bin+pkl 逻辑索引格式的数据集 (tile_las1.py)
+- BinPklDataset: bin+pkl 逻辑索引格式的数据集 (tile_las.py)
 - 各种变换和合并函数
 """
 
 # 基类
 from .datamodule_base import DataModuleBase
 from .datamodule_bin import BinPklDataModule
-from .datamodule_bin1 import BinPklDataModule1
 
 # 向后兼容别名
 PointDataModule = BinPklDataModule
@@ -25,31 +22,24 @@ PointDataModule = BinPklDataModule
 # 数据集
 from .datasets.dataset_base import DatasetBase
 from .datasets.dataset_bin import BinPklDataset
-from .datasets.dataset_bin1 import BinPklDataset1
 
 # 合并函数
 from .datasets.collate import (
     collate_fn,
-    # LimitedPointsCollateFn,
     DynamicBatchSampler,
-    # create_limited_dataloader
 )
 
 __all__ = [
     # 数据模块
     'DataModuleBase',
     'BinPklDataModule',
-    'BinPklDataModule1',
     'PointDataModule',  # 向后兼容
     
     # 数据集
     'DatasetBase',
     'BinPklDataset',
-    'BinPklDataset1',
     
     # 合并函数
     'collate_fn',
-    'LimitedPointsCollateFn',
     'DynamicBatchSampler',
-    # 'create_limited_dataloader',
 ]
