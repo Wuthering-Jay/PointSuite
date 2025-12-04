@@ -30,6 +30,39 @@ from typing import Any, Dict, List, Optional, Union
 from dataclasses import dataclass, field
 
 
+def _convert_scientific_notation(config: Any) -> Any:
+    """
+    递归转换配置中的科学计数法字符串为浮点数
+    
+    PyYAML 的 safe_load 不会自动将 '1e-3' 这样的字符串转换为浮点数
+    这个函数会递归处理配置字典，将这类字符串转换为正确的数值类型
+    
+    Args:
+        config: 配置值（可以是字典、列表或标量）
+        
+    Returns:
+        转换后的配置
+    """
+    if isinstance(config, dict):
+        return {k: _convert_scientific_notation(v) for k, v in config.items()}
+    elif isinstance(config, list):
+        return [_convert_scientific_notation(item) for item in config]
+    elif isinstance(config, str):
+        # 尝试转换科学计数法字符串
+        try:
+            # 检查是否是数值形式的字符串 (包括科学计数法)
+            if re.match(r'^-?[\d.]+[eE][+-]?\d+$', config.strip()):
+                return float(config)
+            # 检查是否是纯浮点数字符串
+            elif re.match(r'^-?\d+\.\d+$', config.strip()):
+                return float(config)
+        except (ValueError, AttributeError):
+            pass
+        return config
+    else:
+        return config
+
+
 def load_yaml(path: Union[str, Path]) -> Dict[str, Any]:
     """
     加载 YAML 文件
@@ -47,7 +80,10 @@ def load_yaml(path: Union[str, Path]) -> Dict[str, Any]:
     with open(path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
     
-    return config or {}
+    # 转换科学计数法字符串
+    config = _convert_scientific_notation(config or {})
+    
+    return config
 
 
 def save_yaml(config: Dict[str, Any], path: Union[str, Path]) -> None:
@@ -239,9 +275,15 @@ class ConfigLoader:
         Returns:
             子配置字典
         """
+        # 获取 configs 根目录 (config_dir 的父目录，如 configs/experiments -> configs)
+        configs_root = self.config_dir.parent
+        
         if category:
-            # 在 configs/{category}/ 目录下查找
-            sub_path = self.config_dir / category / filename
+            # 优先在 configs/{category}/ 目录下查找
+            sub_path = configs_root / category / filename
+            if not sub_path.exists():
+                # 回退到 config_dir/{category}/ (兼容旧结构)
+                sub_path = self.config_dir / category / filename
         else:
             # 在配置目录下直接查找
             sub_path = self.config_dir / filename

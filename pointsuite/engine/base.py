@@ -37,7 +37,7 @@ from ..utils.config import (
     save_yaml,
     deep_merge,
 )
-from ..utils.logger import setup_logger, Colors, print_header, print_section, print_config
+from ..utils.logger import setup_logger, Colors, print_header, print_section, print_config, log_info, log_warning
 
 
 class BaseEngine(ABC):
@@ -311,15 +311,27 @@ class BaseEngine(ABC):
         """
         创建回调列表
         
+        支持新旧两种配置结构:
+        - 旧: callbacks.xxx
+        - 新: trainer.callbacks.xxx, trainer.logging.xxx
+        
         Returns:
             回调列表
         """
+        from ..utils.callbacks import TextLoggingCallback, AutoEmptyCacheCallback
+        
         callbacks = []
-        callback_config = self.config._raw.get('callbacks', {})
+        
+        # 获取回调配置 (支持新旧结构)
+        trainer_config = self.config._raw.get('trainer', {})
+        callback_config = trainer_config.get('callbacks', {}) or self.config._raw.get('callbacks', {})
+        logging_config = trainer_config.get('logging', {})
         
         # ModelCheckpoint
-        if 'model_checkpoint' in callback_config:
-            ckpt_cfg = callback_config['model_checkpoint']
+        ckpt_cfg = callback_config.get('model_checkpoint')
+        if ckpt_cfg:
+            # 移除 enabled 字段（如果有）
+            ckpt_cfg = {k: v for k, v in ckpt_cfg.items() if k != 'enabled'}
             callbacks.append(ModelCheckpoint(
                 dirpath=os.path.join(self.config.output_dir, 'checkpoints'),
                 **ckpt_cfg
@@ -337,12 +349,46 @@ class BaseEngine(ABC):
             ))
         
         # EarlyStopping
-        if 'early_stopping' in callback_config:
-            es_cfg = callback_config['early_stopping']
-            callbacks.append(EarlyStopping(**es_cfg))
+        es_cfg = callback_config.get('early_stopping')
+        if es_cfg:
+            enabled = es_cfg.pop('enabled', True) if isinstance(es_cfg, dict) else True
+            if enabled:
+                es_cfg_clean = {k: v for k, v in es_cfg.items() if k != 'enabled'}
+                callbacks.append(EarlyStopping(**es_cfg_clean))
         
-        # LearningRateMonitor
-        callbacks.append(LearningRateMonitor(logging_interval='step'))
+        # TextLoggingCallback (从 trainer.logging 或 callbacks.text_logging)
+        text_log_cfg = logging_config.get('text_logging') or callback_config.get('text_logging')
+        if text_log_cfg:
+            enabled = text_log_cfg.get('enabled', True)
+            if enabled:
+                callbacks.append(TextLoggingCallback(
+                    log_interval=text_log_cfg.get('log_interval', 10)
+                ))
+        else:
+            # 默认启用文本日志
+            callbacks.append(TextLoggingCallback(log_interval=10))
+        
+        # AutoEmptyCacheCallback
+        aec_cfg = callback_config.get('auto_empty_cache')
+        if aec_cfg:
+            enabled = aec_cfg.get('enabled', True)
+            if enabled:
+                callbacks.append(AutoEmptyCacheCallback(
+                    slowdown_threshold=aec_cfg.get('slowdown_threshold', 3.0),
+                    absolute_threshold=aec_cfg.get('absolute_threshold', 1.5),
+                    clear_interval=aec_cfg.get('clear_interval', 0),
+                    warmup_steps=aec_cfg.get('warmup_steps', 10),
+                    verbose=aec_cfg.get('verbose', True)
+                ))
+        else:
+            # 默认启用自动显存清理
+            callbacks.append(AutoEmptyCacheCallback(
+                slowdown_threshold=3.0,
+                absolute_threshold=1.5,
+                clear_interval=0,
+                warmup_steps=10,
+                verbose=True
+            ))
         
         # 任务特定的默认回调
         callbacks.extend(self._get_default_callbacks())
@@ -361,13 +407,54 @@ class BaseEngine(ABC):
         """
         创建 Trainer
         
+        支持新旧两种配置结构:
+        - 旧: trainer.xxx (直接传递给 Trainer)
+        - 新: trainer.training.xxx, trainer.logging.xxx 等
+        
         Args:
             callbacks: 回调列表
             
         Returns:
             Trainer 实例
         """
-        trainer_config = self.config.trainer.copy()
+        raw_trainer_config = self.config.trainer.copy()
+        
+        # 检测配置结构类型
+        # 新结构有 training/logging/callbacks 等子键
+        is_new_structure = 'training' in raw_trainer_config
+        
+        if is_new_structure:
+            # 新结构：从 training 子配置提取 Trainer 参数
+            training_config = raw_trainer_config.get('training', {})
+            logging_config = raw_trainer_config.get('logging', {})
+            misc_config = raw_trainer_config.get('misc', {})
+            
+            trainer_config = {
+                # 训练配置
+                'max_epochs': training_config.get('max_epochs', 100),
+                'devices': training_config.get('devices', 1),
+                'accelerator': training_config.get('accelerator', 'auto'),
+                'precision': training_config.get('precision', '16-mixed'),
+                'accumulate_grad_batches': training_config.get('accumulate_grad_batches', 2),
+                'gradient_clip_val': training_config.get('gradient_clip_val', 1.0),
+                'gradient_clip_algorithm': training_config.get('gradient_clip_algorithm', 'norm'),
+                'num_sanity_val_steps': training_config.get('num_sanity_val_steps', 2),
+                'check_val_every_n_epoch': training_config.get('check_val_every_n_epoch', 1),
+                'val_check_interval': training_config.get('val_check_interval', 1.0),
+                'limit_train_batches': training_config.get('limit_train_batches'),
+                
+                # 日志配置
+                'log_every_n_steps': logging_config.get('log_every_n_steps', 10),
+                'enable_progress_bar': logging_config.get('enable_progress_bar', False),
+                'enable_model_summary': logging_config.get('enable_model_summary', True),
+                
+                # 其他配置
+                'deterministic': misc_config.get('deterministic', False),
+                'benchmark': misc_config.get('benchmark', True),
+            }
+        else:
+            # 旧结构：直接使用
+            trainer_config = raw_trainer_config
         
         # 设置默认根目录
         if trainer_config.get('default_root_dir') is None:
@@ -380,6 +467,9 @@ class BaseEngine(ABC):
         # 禁用 logger (我们使用自定义日志)
         trainer_config.setdefault('logger', False)
         
+        # 移除 None 值
+        trainer_config = {k: v for k, v in trainer_config.items() if v is not None}
+        
         return pl.Trainer(
             callbacks=callbacks,
             **trainer_config
@@ -389,36 +479,67 @@ class BaseEngine(ABC):
         """
         配置优化器
         
-        如果配置中指定了优化器，通过 monkey patch 覆盖 task 的 configure_optimizers
+        支持新旧两种配置结构:
+        - 旧: optimizer/lr_scheduler 在根级别
+        - 新: trainer.optimizer/trainer.lr_scheduler
         
         Args:
             task: 任务模块
         """
-        optimizer_config = self.config._raw.get('optimizer')
-        scheduler_config = self.config._raw.get('lr_scheduler')
+        # 尝试从新结构或旧结构获取优化器配置
+        trainer_config = self.config._raw.get('trainer', {})
+        optimizer_config = trainer_config.get('optimizer') or self.config._raw.get('optimizer')
+        scheduler_config = trainer_config.get('lr_scheduler') or self.config._raw.get('lr_scheduler')
         
         if optimizer_config is None:
             return
         
+        def resolve_config_value(value, config_root):
+            """递归解析配置值中的引用和类型"""
+            import re
+            if isinstance(value, str):
+                # 检查是否是变量引用
+                pattern = r'\$\{([^}]+)\}'
+                match = re.fullmatch(pattern, value)
+                if match:
+                    # 解析变量引用
+                    path = match.group(1)
+                    keys = path.split('.')
+                    result = config_root
+                    for key in keys:
+                        if isinstance(result, dict) and key in result:
+                            result = result[key]
+                        else:
+                            return value  # 无法解析，返回原值
+                    return result
+                return value
+            elif isinstance(value, dict):
+                return {k: resolve_config_value(v, config_root) for k, v in value.items()}
+            elif isinstance(value, list):
+                return [resolve_config_value(item, config_root) for item in value]
+            else:
+                return value
+        
         # 创建新的 configure_optimizers 方法
         def configure_optimizers(self_task):
-            # 实例化优化器
+            # 解析优化器参数
             optimizer_cls = self._import_class(optimizer_config['class_path'])
-            optimizer_args = optimizer_config.get('init_args', {}).copy()
-            
-            # 处理 lr 引用
-            if 'lr' in optimizer_args and isinstance(optimizer_args['lr'], str):
-                # 如果是字符串引用，尝试解析
-                optimizer_args['lr'] = self.config.get('task.init_args.learning_rate', 1e-3)
+            optimizer_args = resolve_config_value(
+                optimizer_config.get('init_args', {}), 
+                self.config._raw
+            ).copy()
             
             optimizer = optimizer_cls(self_task.parameters(), **optimizer_args)
             
             if scheduler_config is None:
                 return optimizer
             
-            # 实例化学习率调度器
+            # 解析并实例化学习率调度器
             scheduler_cls = self._import_class(scheduler_config['class_path'])
-            scheduler_args = scheduler_config.get('init_args', {}).copy()
+            scheduler_args = resolve_config_value(
+                scheduler_config.get('init_args', {}),
+                self.config._raw
+            ).copy()
             
             # 特殊处理: T_max 为 null 时自动设置
             if scheduler_args.get('T_max') is None and hasattr(self_task.trainer, 'estimated_stepping_batches'):
@@ -468,13 +589,13 @@ class BaseEngine(ABC):
         self._print_config()
         
         # 创建 DataModule
-        print_section("📦 初始化 DataModule")
+        print_section("初始化 DataModule")
         if self._datamodule is None:
             self._datamodule = self._create_datamodule()
         self._datamodule.setup(stage='fit' if stage is None else stage)
         
         # 创建 Task
-        print_section("🧠 初始化模型")
+        print_section("初始化模型")
         if self._task is None:
             self._task = self._create_task()
         
@@ -485,7 +606,7 @@ class BaseEngine(ABC):
         callbacks = self._create_callbacks()
         
         # 创建 Trainer
-        print_section("🔧 初始化 Trainer")
+        print_section("初始化 Trainer")
         if self._trainer is None:
             self._trainer = self._create_trainer(callbacks)
         
@@ -507,7 +628,7 @@ class BaseEngine(ABC):
         if not self._is_setup:
             self.setup()
         
-        print_header("开始训练", "🏋️")
+        print_header("开始训练")
         
         mode = self.config.mode
         
@@ -518,14 +639,14 @@ class BaseEngine(ABC):
             ckpt = ckpt_path or self.config.checkpoint_path
             if ckpt is None:
                 raise ValueError("resume 模式需要指定 checkpoint_path")
-            print(f"  从 checkpoint 继续训练: {Colors.CYAN}{ckpt}{Colors.RESET}")
+            log_info(f"从 checkpoint 继续训练: {Colors.CYAN}{ckpt}{Colors.RESET}")
             self.trainer.fit(self.task, self.datamodule, ckpt_path=ckpt)
             
         elif mode == 'finetune':
             ckpt = ckpt_path or self.config.checkpoint_path
             if ckpt is None:
                 raise ValueError("finetune 模式需要指定 checkpoint_path")
-            print(f"  加载预训练权重: {Colors.CYAN}{ckpt}{Colors.RESET}")
+            log_info(f"加载预训练权重: {Colors.CYAN}{ckpt}{Colors.RESET}")
             self._load_pretrained_weights(ckpt)
             self.trainer.fit(self.task, self.datamodule)
         
@@ -544,7 +665,7 @@ class BaseEngine(ABC):
         if not self._is_setup:
             self.setup()
         
-        print_header("开始测试", "🧪")
+        print_header("开始测试")
         
         # 确定 checkpoint
         if ckpt_path is None:
@@ -569,7 +690,7 @@ class BaseEngine(ABC):
         if not self._is_setup:
             self.setup()
         
-        print_header("开始预测", "🔮")
+        print_header("开始预测")
         
         # 确定 checkpoint
         if ckpt_path is None:
@@ -645,48 +766,45 @@ class BaseEngine(ABC):
         missing_keys, unexpected_keys = self.task.load_state_dict(new_state_dict, strict=False)
         
         if missing_keys:
-            print(f"  {Colors.YELLOW}缺失的键: {missing_keys[:5]}...{Colors.RESET}")
+            log_warning(f"缺失的键: {missing_keys[:5]}...")
         if unexpected_keys:
-            print(f"  {Colors.YELLOW}未预期的键: {unexpected_keys[:5]}...{Colors.RESET}")
-        print(f"  {Colors.GREEN}✓ 权重加载完成{Colors.RESET}")
+            log_warning(f"未预期的键: {unexpected_keys[:5]}...")
+        log_info(f"{Colors.GREEN}[OK] 权重加载完成{Colors.RESET}")
     
     def _print_config(self) -> None:
         """打印配置信息"""
-        print_header(f"{self.TASK_TYPE.upper()} 任务", "🎯")
+        print_header(f"{self.TASK_TYPE.upper()} 任务")
         
         print_config({
             '运行模式': self.config.mode,
             '随机种子': self.config.seed,
             '输出目录': self.config.output_dir,
-        }, "⚙️  运行配置")
+        }, "运行配置")
     
     def _print_trainer_info(self) -> None:
         """打印 Trainer 信息"""
         device_name = 'GPU (CUDA)' if torch.cuda.is_available() else 'CPU'
-        print(f"  {Colors.DIM}├─{Colors.RESET} 设备: {Colors.GREEN}{device_name}{Colors.RESET}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} 精度: {Colors.GREEN}{self.trainer.precision}{Colors.RESET}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} Epochs: {Colors.GREEN}{self.config.trainer.get('max_epochs', 100)}{Colors.RESET}")
-        print(f"  {Colors.DIM}└─{Colors.RESET} 检查点目录: {Colors.CYAN}{self.config.output_dir}{Colors.RESET}")
+        log_info(f"设备: {Colors.GREEN}{device_name}{Colors.RESET}, "
+                 f"精度: {Colors.GREEN}{self.trainer.precision}{Colors.RESET}, "
+                 f"Epochs: {Colors.GREEN}{self.config.trainer.get('max_epochs', 100)}{Colors.RESET}")
     
     def _print_completion(self) -> None:
         """打印完成信息"""
         print()
-        print(f"{Colors.BOLD}{'═' * 70}{Colors.RESET}")
-        print(f"{Colors.BOLD}{Colors.GREEN}  🎉 任务完成!{Colors.RESET}")
-        print(f"{Colors.BOLD}{'═' * 70}{Colors.RESET}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} 检查点目录: {Colors.CYAN}{self.trainer.default_root_dir}{Colors.RESET}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} 输出目录: {Colors.CYAN}{self.config.output_dir}{Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.GREEN}{'═' * 70}{Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.GREEN}  任务完成!{Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.GREEN}{'═' * 70}{Colors.RESET}")
+        
+        log_info(f"输出目录: {Colors.CYAN}{self.config.output_dir}{Colors.RESET}")
         
         if hasattr(self.trainer, 'checkpoint_callback') and self.trainer.checkpoint_callback:
             if self.trainer.checkpoint_callback.best_model_path:
-                print(f"  {Colors.DIM}├─{Colors.RESET} 最佳模型: {Colors.GREEN}{self.trainer.checkpoint_callback.best_model_path}{Colors.RESET}")
+                log_info(f"最佳模型: {Colors.GREEN}{self.trainer.checkpoint_callback.best_model_path}{Colors.RESET}")
             
             if self.trainer.checkpoint_callback.best_model_score is not None:
-                print(f"  {Colors.DIM}└─{Colors.RESET} 最佳分数: {Colors.GREEN}{self.trainer.checkpoint_callback.best_model_score:.4f}{Colors.RESET}")
-            else:
-                print(f"  {Colors.DIM}└─{Colors.RESET} 最佳分数: {Colors.DIM}N/A{Colors.RESET}")
+                log_info(f"最佳分数: {Colors.GREEN}{self.trainer.checkpoint_callback.best_model_score:.4f}{Colors.RESET}")
         
-        print(f"{Colors.BOLD}{'═' * 70}{Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.GREEN}{'═' * 70}{Colors.RESET}")
     
     # ========================================================================
     # 保存/加载配置
@@ -703,4 +821,4 @@ class BaseEngine(ABC):
             path = Path(self.config.output_dir) / 'config.yaml'
         
         self.config.save(path)
-        print(f"配置已保存到: {path}")
+        log_info(f"配置已保存到: {Colors.CYAN}{path}{Colors.RESET}")

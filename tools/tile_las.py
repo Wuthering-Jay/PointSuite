@@ -175,7 +175,7 @@ class LASProcessorLogicalIndex:
         
         # 美化的完成输出
         print(f"\n{Colors.BOLD}{'═'*70}{Colors.RESET}")
-        print(f"{Colors.BOLD}{Colors.GREEN}  ✅ 处理完成!{Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.GREEN}  [OK] 处理完成!{Colors.RESET}")
         print(f"  {Colors.DIM}├─{Colors.RESET} ⏱️  总耗时: {Colors.CYAN}{format_time(elapsed)}{Colors.RESET}")
         print(f"  {Colors.DIM}└─{Colors.RESET} 📄 平均每文件: {Colors.CYAN}{format_time(elapsed/len(self.las_files))}{Colors.RESET}")
         print(f"{Colors.BOLD}{'═'*70}{Colors.RESET}\n")
@@ -563,7 +563,7 @@ class LASProcessorLogicalIndex:
         
         # 4. 兜底处理：如果没有 classification，补全为 0
         if not has_classification:
-            print(f"  {Colors.DIM}│{Colors.RESET}  {Colors.YELLOW}⚠️  无 classification 字段，补全为 0{Colors.RESET}")
+            print(f"  {Colors.DIM}│{Colors.RESET}  {Colors.YELLOW}[WARN] 无 classification 字段，补全为 0{Colors.RESET}")
             data_dict['classification'] = np.zeros(len(las_data.points), dtype=np.uint8)
             dtype_list.append(('classification', np.uint8))
             fields_to_save.append('classification')

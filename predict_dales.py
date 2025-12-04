@@ -65,7 +65,7 @@ def main():
     
     # 检查 checkpoint 文件是否存在
     if not os.path.exists(CHECKPOINT_PATH):
-        print(f"\n❌ 错误: Checkpoint 文件不存在: {CHECKPOINT_PATH}")
+        print(f"\n[ERROR] Checkpoint 文件不存在: {CHECKPOINT_PATH}")
         print("\n请检查以下内容：")
         print("1. 确认训练是否完成并保存了checkpoint")
         print("2. 查看 outputs/dales/checkpoints/ 目录")
@@ -89,7 +89,7 @@ def main():
             strict=False
         )
     except TypeError as e:
-        print(f"\n⚠️  自动加载失败: {e}")
+        print(f"\n[WARN] 自动加载失败: {e}")
         print("尝试手动实例化 Backbone 和 Head...")
         
         # 这里需要硬编码训练时的配置，或者从配置文件读取
@@ -138,7 +138,7 @@ def main():
     if class_mapping:
         reverse_mapping = {v: k for k, v in class_mapping.items()}
     
-    print(f"✓ 模型加载成功")
+    print(f"[OK] 模型加载成功")
     print(f"  - 自动提取类别数: {num_classes}")
     print(f"  - 自动提取 Class Mapping: {class_mapping is not None}")
     

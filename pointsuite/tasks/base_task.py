@@ -6,6 +6,8 @@ import importlib
 import yaml
 from typing import List, Dict, Any
 
+from ..utils.logger import log_warning, log_error, Colors
+
 class BaseTask(pl.LightningModule):
     """
     一个抽象的任务基类 (LightningModule)。
@@ -152,7 +154,7 @@ class BaseTask(pl.LightningModule):
                         )
                 self._pending_hparams_save = False
             except Exception as e:
-                print(f"Warning: Could not save hparams with Chinese characters: {e}")
+                log_warning(f"Could not save hparams with Chinese characters: {e}")
 
     def _import_class(self, class_path: str) -> type:
         """一个辅助函数，用于从字符串路径动态导入类"""
@@ -313,10 +315,10 @@ class BaseTask(pl.LightningModule):
                              for k, v in batch.items()},
                     'error': str(e)
                 }, f)
-            print(f"\n{'='*80}")
-            print(f"[ERROR] 在 batch_idx={batch_idx}, global_step={self.global_step} 时发生错误")
-            print(f"问题数据已保存到: {error_data_path}")
-            print(f"{'='*80}\n")
+            print(f"\n{Colors.ERROR}{'='*80}{Colors.RESET}")
+            log_error(f"在 batch_idx={batch_idx}, global_step={self.global_step} 时发生错误")
+            log_error(f"问题数据已保存到: {error_data_path}")
+            print(f"{Colors.ERROR}{'='*80}{Colors.RESET}\n")
             raise
         
         # Loss 计算
@@ -440,17 +442,17 @@ class BaseTask(pl.LightningModule):
         """
         # 默认：只打印简单的摘要
         display_epoch = self.current_epoch + 1
-        print(f"\n{'='*60}")
-        print(f"Validation Epoch {display_epoch} - Metrics")
-        print(f"{'='*60}")
+        print(f"\n{Colors.BOLD}{Colors.INFO}{'='*60}{Colors.RESET}")
+        print(f"{Colors.BOLD}Validation Epoch {display_epoch} - Metrics{Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.INFO}{'='*60}{Colors.RESET}")
         
         for name, value in print_metrics.items():
             if isinstance(value, (float, int)):
-                print(f"  {name}: {value:.4f}")
+                print(f"  {Colors.DIM}{name}:{Colors.RESET} {Colors.SUCCESS}{value:.4f}{Colors.RESET}")
             elif isinstance(value, torch.Tensor) and value.numel() == 1:
-                print(f"  {name}: {value.item():.4f}")
+                print(f"  {Colors.DIM}{name}:{Colors.RESET} {Colors.SUCCESS}{value.item():.4f}{Colors.RESET}")
         
-        print(f"{'='*60}\n")
+        print(f"{Colors.BOLD}{Colors.INFO}{'='*60}{Colors.RESET}\n")
 
     # --- 测试 (Test) 逻辑 ---
     

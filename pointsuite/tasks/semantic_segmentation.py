@@ -4,6 +4,7 @@ import numpy as np
 from typing import Dict, Any, List, Optional
 
 from .base_task import BaseTask
+from ..utils.logger import Colors, log_warning
 
 
 # 辅助函数：计算字符串的显示宽度（中文字符占 2 个宽度）
@@ -250,16 +251,16 @@ class SemanticSegmentationTask(BaseTask):
 
             # 输出标题和总体指标 (epoch 从 1 开始显示)
             display_epoch = self.current_epoch + 1
-            print(f"\n{'='*100}")
-            print(f"Validation Epoch {display_epoch} - Metrics")
-            print(f"{'='*100}")
+            print(f"\n{Colors.BOLD}{Colors.SUCCESS}{'='*100}{Colors.RESET}")
+            print(f"{Colors.BOLD}Validation Epoch {display_epoch} - Metrics{Colors.RESET}")
+            print(f"{Colors.BOLD}{Colors.SUCCESS}{'='*100}{Colors.RESET}")
             if overall_acc is not None:
-                print(f"Overall Accuracy: {overall_acc:.4f} ({overall_acc*100:.2f}%)")
-            print(f"Mean IoU (current): {current_miou:.4f}")
-            print(f"Mean IoU (best)   : {self.best_miou:.4f} (Epoch {self.best_miou_epoch + 1})")
+                print(f"Overall Accuracy: {Colors.SUCCESS}{overall_acc:.4f}{Colors.RESET} ({overall_acc*100:.2f}%)")
+            print(f"Mean IoU (current): {Colors.SUCCESS}{current_miou:.4f}{Colors.RESET}")
+            print(f"Mean IoU (best)   : {Colors.SUCCESS}{self.best_miou:.4f}{Colors.RESET} (Epoch {self.best_miou_epoch + 1})")
             if current_miou > self.best_miou - 1e-6:  # 当前是最佳
-                print(f"🎉 New best mIoU achieved!")
-            print(f"{'='*100}")
+                print(f"{Colors.SUCCESS}* New best mIoU achieved!{Colors.RESET}")
+            print(f"{Colors.BOLD}{Colors.SUCCESS}{'='*100}{Colors.RESET}")
             
             # 输出每个类别的详细指标
             if per_class_iou is not None:
@@ -267,9 +268,9 @@ class SemanticSegmentationTask(BaseTask):
                     per_class_iou, per_class_precision, per_class_recall, per_class_f1,
                     print_metrics, current_miou
                 )
-            print(f"{'='*100}\n")
+            print(f"{Colors.BOLD}{Colors.SUCCESS}{'='*100}{Colors.RESET}\n")
         except Exception as e:
-            print(f"Warning: Could not print detailed metrics: {e}")
+            log_warning(f"Could not print detailed metrics: {e}")
             import traceback
             traceback.print_exc()
     
@@ -309,22 +310,22 @@ class SemanticSegmentationTask(BaseTask):
                     per_class_recall = intersection / (confmat.sum(1) + 1e-10)
                     per_class_f1 = 2 * per_class_precision * per_class_recall / (per_class_precision + per_class_recall + 1e-10)
 
-            print(f"\n{'='*100}")
-            print(f"Test Results - Metrics")
-            print(f"{'='*100}")
+            print(f"\n{Colors.BOLD}{Colors.CYAN}{'='*100}{Colors.RESET}")
+            print(f"{Colors.BOLD}Test Results - Metrics{Colors.RESET}")
+            print(f"{Colors.BOLD}{Colors.CYAN}{'='*100}{Colors.RESET}")
             if overall_acc is not None:
-                print(f"Overall Accuracy: {overall_acc:.4f} ({overall_acc*100:.2f}%)")
-            print(f"Mean IoU: {current_miou:.4f}")
-            print(f"{'='*100}")
+                print(f"Overall Accuracy: {Colors.SUCCESS}{overall_acc:.4f}{Colors.RESET} ({overall_acc*100:.2f}%)")
+            print(f"Mean IoU: {Colors.SUCCESS}{current_miou:.4f}{Colors.RESET}")
+            print(f"{Colors.BOLD}{Colors.CYAN}{'='*100}{Colors.RESET}")
             
             if per_class_iou is not None:
                 self._print_per_class_metrics(
                     per_class_iou, per_class_precision, per_class_recall, per_class_f1,
                     print_metrics, current_miou
                 )
-            print(f"{'='*100}\n")
+            print(f"{Colors.BOLD}{Colors.CYAN}{'='*100}{Colors.RESET}\n")
         except Exception as e:
-            print(f"Warning: Could not print detailed test metrics: {e}")
+            log_warning(f"Could not print detailed test metrics: {e}")
             import traceback
             traceback.print_exc()
     

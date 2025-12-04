@@ -9,6 +9,7 @@ from torch.utils.data import Dataset
 from collections.abc import Sequence
 from ..transforms import Compose
 from ...utils.mapping import ClassMapping, ClassMappingInput, normalize_class_mapping
+from ...utils.logger import log_info, Colors
 
 
 class DatasetBase(Dataset, ABC):
@@ -94,11 +95,9 @@ class DatasetBase(Dataset, ABC):
     
     def _print_init_info(self):
         """打印数据集初始化信息"""
-        print(f"==> {self.__class__.__name__} ({self.split}) 已初始化:")
-        print(f"    - 数据根目录: {self.data_root}")
-        print(f"    - 总样本数: {len(self.data_list)}")
-        print(f"    - 属性: {self.assets}")
-        print(f"    - 循环: {self.loop}")
+        log_info(f"{Colors.BOLD}{self.__class__.__name__}{Colors.RESET} ({Colors.SUCCESS}{self.split}{Colors.RESET}) 已初始化: "
+                 f"样本数={Colors.INFO}{len(self.data_list)}{Colors.RESET}, "
+                 f"循环={Colors.INFO}{self.loop}{Colors.RESET}")
     
     @abstractmethod
     def _load_data_list(self) -> List[Dict[str, Any]]:

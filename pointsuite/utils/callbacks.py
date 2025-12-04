@@ -13,14 +13,15 @@ from pytorch_lightning.callbacks import Callback
 import datetime
 
 from .mapping import ClassMapping, ClassMappingInput, create_reverse_mapping
+from .logger import log_warning, log_error, log_info, log_success, Colors
 
 
 # 导入 laspy (您需要 'pip install laspy')
 try:
     import laspy
 except ImportError:
-    print("警告: 'laspy' 库未安装。PredictionWriter 将无法保存 .las 文件。")
-    print("请运行: pip install laspy")
+    log_warning("'laspy' 库未安装。PredictionWriter 将无法保存 .las 文件。")
+    log_warning("请运行: pip install laspy")
 
 
 # ============================================
@@ -204,10 +205,10 @@ class SemanticPredictLasWriter_old(BasePredictionWriter):
 
     def _validate_prediction(self, prediction, batch_idx):
         if 'logits' not in prediction or 'indices' not in prediction:
-            print(f"警告: predict_step 必须返回 'logits' 和 'indices'。跳过批次 {batch_idx}")
+            log_warning(f"predict_step 必须返回 'logits' 和 'indices'。跳过批次 {batch_idx}")
             return False
         if 'bin_file' not in prediction or len(prediction['bin_file']) == 0:
-            print(f"警告: batch {batch_idx} 缺少 bin_file 信息，跳过")
+            log_warning(f"batch {batch_idx} 缺少 bin_file 信息，跳过")
             return False
         return True
 
@@ -267,7 +268,7 @@ class SemanticPredictLasWriter_old(BasePredictionWriter):
                 self.num_classes = pl_module.num_classes
             pl_module.print(f"[SemanticPredictLasWriter] 从模型推断类别数: {self.num_classes}")
         except Exception:
-            print("错误: 无法从模型推断 num_classes，请显式指定")
+            log_error("无法从模型推断 num_classes，请显式指定")
 
     def _group_temp_files(self, tmp_files):
         groups = defaultdict(list)
@@ -282,7 +283,7 @@ class SemanticPredictLasWriter_old(BasePredictionWriter):
             try:
                 if os.path.exists(f): os.remove(f)
             except Exception as e:
-                print(f"警告: 无法删除 {f}: {e}")
+                log_warning(f"无法删除 {f}: {e}")
         
         try:
             import shutil
@@ -419,7 +420,7 @@ class SemanticPredictLasWriter_old(BasePredictionWriter):
             return None, None
             
         except Exception as e:
-            print(f"错误: 查找 bin/pkl 文件失败: {e}")
+            log_error(f"查找 bin/pkl 文件失败: {e}")
             return None, None
     
     def _save_las_file(
@@ -530,38 +531,38 @@ class SemanticPredictLasWriter_old(BasePredictionWriter):
                     # 强度 (Intensity)
                     if 'intensity' in field_names:
                         las.intensity = point_data['intensity']
-                        pl_module.print(f"      ✓ 恢复 intensity")
+                        pl_module.print(f"      [OK] 恢复 intensity")
                     
                     # 回波信息 (Return Number, Number of Returns)
                     if 'return_number' in field_names:
                         las.return_number = point_data['return_number']
-                        pl_module.print(f"      ✓ 恢复 return_number")
+                        pl_module.print(f"      [OK] 恢复 return_number")
                     if 'number_of_returns' in field_names:
                         las.number_of_returns = point_data['number_of_returns']
-                        pl_module.print(f"      ✓ 恢复 number_of_returns")
+                        pl_module.print(f"      [OK] 恢复 number_of_returns")
                     
                     # 扫描角度 (Scan Angle)
                     if 'scan_angle_rank' in field_names:
                         las.scan_angle_rank = point_data['scan_angle_rank']
-                        pl_module.print(f"      ✓ 恢复 scan_angle_rank")
+                        pl_module.print(f"      [OK] 恢复 scan_angle_rank")
                     elif 'scan_angle' in field_names:
                         las.scan_angle = point_data['scan_angle']
-                        pl_module.print(f"      ✓ 恢复 scan_angle")
+                        pl_module.print(f"      [OK] 恢复 scan_angle")
                     
                     # 用户数据 (User Data)
                     if 'user_data' in field_names:
                         las.user_data = point_data['user_data']
-                        pl_module.print(f"      ✓ 恢复 user_data")
+                        pl_module.print(f"      [OK] 恢复 user_data")
                     
                     # 点源 ID (Point Source ID)
                     if 'point_source_id' in field_names:
                         las.point_source_id = point_data['point_source_id']
-                        pl_module.print(f"      ✓ 恢复 point_source_id")
+                        pl_module.print(f"      [OK] 恢复 point_source_id")
                     
                     # GPS 时间 (GPS Time)
                     if 'gps_time' in field_names:
                         las.gps_time = point_data['gps_time']
-                        pl_module.print(f"      ✓ 恢复 gps_time")
+                        pl_module.print(f"      [OK] 恢复 gps_time")
                     
                     # RGB 颜色 (如果 point_format 支持)
                     if header.point_format.id in [2, 3, 5, 7, 8, 10]:
@@ -569,12 +570,12 @@ class SemanticPredictLasWriter_old(BasePredictionWriter):
                             las.red = point_data['red']
                             las.green = point_data['green']
                             las.blue = point_data['blue']
-                            pl_module.print(f"      ✓ 恢复 RGB 颜色")
+                            pl_module.print(f"      [OK] 恢复 RGB 颜色")
                         
                         # NIR (近红外) - 如果支持
                         if 'nir' in field_names and header.point_format.id in [8, 10]:
                             las.nir = point_data['nir']
-                            pl_module.print(f"      ✓ 恢复 NIR")
+                            pl_module.print(f"      [OK] 恢复 NIR")
                     
                     # 其他可能的字段可以根据需要添加
                     
@@ -584,7 +585,7 @@ class SemanticPredictLasWriter_old(BasePredictionWriter):
             
             # 5. 设置预测的分类标签（覆盖原始分类）
             las.classification = classification
-            pl_module.print(f"      ✓ 设置预测分类标签")
+            pl_module.print(f"      [OK] 设置预测分类标签")
             
             # 6. 写入文件
             las.write(las_path)
@@ -724,34 +725,57 @@ class AutoEmptyCacheCallback(Callback):
 
 class TextLoggingCallback(Callback):
     """
-    A simple callback that logs training/validation/test/prediction progress as text lines.
-    Replaces dynamic progress bars to avoid display issues.
+    文本日志回调
+    
+    替代 tqdm 进度条，提供统一风格的文本输出:
+    - 训练/验证/测试/预测进度
+    - 颜色区分不同阶段
+    - 关键指标显示
     """
+    
     def __init__(self, log_interval: int = 10):
         super().__init__()
         self.log_interval = log_interval
         self.stage_start_time = 0.0
+        
+        # 导入日志工具
+        from .logger import (
+            Colors, print_header, print_section, 
+            format_points, log_info, log_warning
+        )
+        self.Colors = Colors
+        self.format_points = format_points
 
     def _reset_timer(self):
         self.stage_start_time = time.time()
+
+    def on_fit_start(self, trainer, pl_module):
+        """训练开始时调用"""
+        from .logger import print_box
+        print_box("开始训练", {
+            "最大轮数": trainer.max_epochs,
+            "训练批次数": trainer.num_training_batches,
+        })
 
     def on_train_epoch_start(self, trainer, pl_module):
         self._reset_timer()
         display_epoch = trainer.current_epoch + 1
         max_epochs = trainer.max_epochs if trainer.max_epochs else "?"
-        print(f"\n{'='*40}\nEpoch {display_epoch}/{max_epochs} Started\n{'='*40}")
+        print(f"\n{self.Colors.BOLD}{self.Colors.GREEN}{'─' * 60}{self.Colors.RESET}")
+        print(f"{self.Colors.BOLD}{self.Colors.GREEN}  Epoch {display_epoch}/{max_epochs}{self.Colors.RESET}")
+        print(f"{self.Colors.BOLD}{self.Colors.GREEN}{'─' * 60}{self.Colors.RESET}")
 
     def on_validation_epoch_start(self, trainer, pl_module):
         self._reset_timer()
-        print(f"\n{'='*40}\nValidation Started\n{'='*40}")
+        print(f"\n{self.Colors.BOLD}{self.Colors.BLUE}  📊 验证中...{self.Colors.RESET}")
     
     def on_test_epoch_start(self, trainer, pl_module):
         self._reset_timer()
-        print(f"\n{'='*40}\nTest Started\n{'='*40}")
+        print(f"\n{self.Colors.BOLD}{self.Colors.CYAN}  🧪 测试中...{self.Colors.RESET}")
 
     def on_predict_epoch_start(self, trainer, pl_module):
         self._reset_timer()
-        print(f"\n{'='*40}\nPrediction Started\n{'='*40}")
+        print(f"\n{self.Colors.BOLD}{self.Colors.MAGENTA}  🔮 预测中...{self.Colors.RESET}")
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         self._log_batch(trainer, pl_module, batch, batch_idx, stage="Train")
@@ -766,14 +790,23 @@ class TextLoggingCallback(Callback):
         self._log_batch(trainer, pl_module, batch, batch_idx, stage="Pred")
 
     def _log_batch(self, trainer, pl_module, batch, batch_idx, stage):
-        # 🔥 始终输出第一个 batch（便于调试）
+        # 始终输出第一个 batch（便于调试）
         if batch_idx == 0 and stage != "Train":
-            pass  # 继续执行，不 return
+            pass  # 继续执行
         elif (batch_idx + 1) % self.log_interval != 0:
             return
 
-        # 1. Basic Info
+        # 1. 基本信息
         current_batch = batch_idx + 1
+        
+        # 阶段颜色
+        stage_colors = {
+            'Train': self.Colors.GREEN,
+            'Val': self.Colors.BLUE,
+            'Test': self.Colors.CYAN,
+            'Pred': self.Colors.MAGENTA
+        }
+        stage_color = stage_colors.get(stage, self.Colors.WHITE)
         
         # Total Batches
         total_batches = 0
@@ -786,16 +819,17 @@ class TextLoggingCallback(Callback):
         elif stage == "Pred":
             total_batches = sum(trainer.num_predict_batches) if isinstance(trainer.num_predict_batches, list) else trainer.num_predict_batches
             
-        # Epoch Info (1-based display) - 仅在 Train/Val 阶段显示
+        # Epoch Info (仅在 Train/Val 阶段显示)
         epoch_str = ""
         if stage in ("Train", "Val"):
             max_epochs = trainer.max_epochs if trainer.max_epochs is not None else "?"
             display_epoch = trainer.current_epoch + 1
-            epoch_str = f"[{display_epoch}/{max_epochs}] "
+            epoch_str = f"[{display_epoch}/{max_epochs}]"
 
-        # 2. Time Calculation
+        # 2. 时间计算
         now = time.time()
-        if self.stage_start_time == 0.0: self.stage_start_time = now # Safety
+        if self.stage_start_time == 0.0: 
+            self.stage_start_time = now
         elapsed_sec = now - self.stage_start_time
         
         avg_time = 0.0
@@ -803,12 +837,12 @@ class TextLoggingCallback(Callback):
         if current_batch > 0:
             avg_time = elapsed_sec / current_batch
             if isinstance(total_batches, (int, float)) and total_batches > 0 and total_batches >= current_batch:
-                 remaining_sec = avg_time * (total_batches - current_batch)
-                 remaining_str = str(datetime.timedelta(seconds=int(remaining_sec)))
+                remaining_sec = avg_time * (total_batches - current_batch)
+                remaining_str = str(datetime.timedelta(seconds=int(remaining_sec)))
         
         elapsed_str = str(datetime.timedelta(seconds=int(elapsed_sec)))
 
-        # 3. Batch Data Info
+        # 3. 批次数据信息
         batch_size = 0
         num_points = 0
         if isinstance(batch, dict):
@@ -817,71 +851,72 @@ class TextLoggingCallback(Callback):
             if coord is not None:
                 num_points = coord.shape[0]
         
-        pts_str = str(num_points)
-        if num_points >= 1_000_000:
-            pts_str = f"{num_points/1_000_000:.1f}M"
-        elif num_points >= 1_000:
-            pts_str = f"{num_points/1_000:.0f}K"
+        pts_str = self.format_points(num_points)
 
-        # 4. Learning Rate
+        # 4. 学习率
         lr_str = ""
         if stage == "Train" and trainer.optimizers:
             try:
                 lr = trainer.optimizers[0].param_groups[0]['lr']
-                lr_str = f", lr={lr:.2e}"
+                lr_str = f"lr={self.Colors.YELLOW}{lr:.2e}{self.Colors.RESET}"
             except:
                 pass
 
-        # 5. Metrics (Losses)
-        metrics_str = ""
+        # 5. 指标 (损失)
+        metrics_parts = []
         if stage != "Pred":
-            metrics_str_parts = []
-            
-            # For Train, we prioritize 'live_loss' or 'total_loss_step'
+            # 训练阶段
             if stage == "Train":
                 loss_val = None
                 if hasattr(trainer, 'live_loss'):
-                     loss_val = trainer.live_loss
+                    loss_val = trainer.live_loss
                 elif "total_loss_step" in trainer.callback_metrics:
-                     loss_val = trainer.callback_metrics["total_loss_step"].item()
+                    loss_val = trainer.callback_metrics["total_loss_step"].item()
                 
                 if loss_val is not None:
-                    metrics_str_parts.append(f"loss={loss_val:.4f}")
+                    loss_color = self.Colors.RED if loss_val > 2.0 else (self.Colors.YELLOW if loss_val > 1.0 else self.Colors.GREEN)
+                    metrics_parts.append(f"loss={loss_color}{loss_val:.4f}{self.Colors.RESET}")
 
-                # Add other step metrics
+                # 其他步骤指标
                 for k, v in trainer.callback_metrics.items():
                     if k.endswith("_step") and k != "total_loss_step" and "val" not in k and "test" not in k:
                         name = k.replace("_step", "").replace("train_", "")
-                        
-                        # Map common loss names to shorter versions
-                        if name == "ce_loss": name = "CE"
-                        elif name == "lovasz_loss": name = "LOV"
-                        # elif "dice" in name: name = "DICE"
-                        # elif "focal" in name: name = "FOCAL"
-                        # elif "lac" in name: name = "LAC"
-                        elif name == "lac_loss": name = "LAC"
-                        elif name == "focal_loss": name = "FOCAL"
-                        elif name == "dice_loss": name = "DICE"
-                        
+                        name_map = {
+                            "ce_loss": "CE", "lovasz_loss": "LOV", 
+                            "dice_loss": "DICE", "focal_loss": "FOCAL", "lac_loss": "LAC"
+                        }
+                        name = name_map.get(name, name)
                         val = v.item() if hasattr(v, 'item') else v
-                        metrics_str_parts.append(f"{name}={val:.4f}")
-            
+                        metrics_parts.append(f"{name}={val:.4f}")
             else:
-                # For Val/Test, show whatever is available in callback_metrics that matches the stage
+                # Val/Test 阶段
                 prefix = "val" if stage == "Val" else "test"
                 for k, v in trainer.callback_metrics.items():
                     if k.startswith(prefix) and "loss" in k:
-                         name = k.replace(f"{prefix}_", "")
-                         val = v.item() if hasattr(v, 'item') else v
-                         metrics_str_parts.append(f"{name}={val:.4f}")
+                        name = k.replace(f"{prefix}_", "")
+                        val = v.item() if hasattr(v, 'item') else v
+                        metrics_parts.append(f"{name}={val:.4f}")
 
-            if metrics_str_parts:
-                metrics_str = ", " + ", ".join(metrics_str_parts)
+        metrics_str = ", ".join(metrics_parts) if metrics_parts else ""
 
-        # Print
-        print(f"[{stage}] {epoch_str}[{current_batch}/{total_batches}] "
-              f"{elapsed_str}<{remaining_str}, {avg_time:.2f}s/it"
-              f"{lr_str}{metrics_str}, bs={batch_size}, pts={pts_str}")
+        # 6. 构建并打印输出
+        parts = [
+            f"{stage_color}[{stage}]{self.Colors.RESET}",
+            f"{self.Colors.DIM}{epoch_str}{self.Colors.RESET}" if epoch_str else "",
+            f"[{current_batch}/{total_batches}]",
+            f"{self.Colors.DIM}{elapsed_str}<{remaining_str}{self.Colors.RESET}",
+            f"{self.Colors.DIM}{avg_time:.2f}s/it{self.Colors.RESET}",
+        ]
+        
+        if lr_str:
+            parts.append(lr_str)
+        if metrics_str:
+            parts.append(metrics_str)
+        
+        parts.append(f"bs={batch_size}")
+        parts.append(f"pts={pts_str}")
+        
+        print(" ".join(filter(None, parts)))
 
 
 # ============================================================================
@@ -937,11 +972,11 @@ class SemanticPredictLasWriter(BasePredictionWriter):
         # 美化输出
         print()
         print("╔" + "═" * 68 + "╗")
-        print("║" + " 🚀 语义分割预测 (逻辑索引格式)".center(58) + "║")
+        print("║" + " 语义分割预测 (逻辑索引格式)".center(58) + "║")
         print("╠" + "═" * 68 + "╣")
-        print(f"║  📁 输出目录: {self.output_dir[:50]:<50} ║")
-        print(f"║  🏷️  类别数量: {self.num_classes if self.num_classes > 0 else '自动推断':<50} ║")
-        print(f"║  💾 保存 Logits: {'是' if self.save_logits else '否':<50} ║")
+        print(f"║  输出目录: {self.output_dir[:50]:<50} ║")
+        print(f"║  类别数量: {self.num_classes if self.num_classes > 0 else '自动推断':<50} ║")
+        print(f"║  保存 Logits: {'是' if self.save_logits else '否':<50} ║")
         print("╚" + "═" * 68 + "╝")
         print()
 
@@ -988,12 +1023,12 @@ class SemanticPredictLasWriter(BasePredictionWriter):
         
         print()
         print("╔" + "═" * 68 + "╗")
-        print("║" + " 📊 预测完成，开始拼接和投票...".center(53) + "║")
+        print("║" + " 预测完成，开始拼接和投票...".center(53) + "║")
         print("╚" + "═" * 68 + "╝")
         print()
         
         # ========== 调试信息：比较预期文件和实际收到的文件 ==========
-        print("  🔍 [调试] 数据覆盖诊断:")
+        print("  [调试] 数据覆盖诊断:")
         print(f"     - 预测过程中遇到的文件: {len(self._stats['files_processed'])}")
         for f in sorted(self._stats['files_processed']):
             print(f"       • {f}")
@@ -1015,28 +1050,28 @@ class SemanticPredictLasWriter(BasePredictionWriter):
             missing = expected_files - self._stats['files_processed']
             extra = self._stats['files_processed'] - expected_files
             if missing:
-                print(f"     ⚠️  遗漏的文件 ({len(missing)}):")
+                print(f"     [WARN] 遗漏的文件 ({len(missing)}):")
                 for f in sorted(missing):
-                    print(f"       • {f}")
+                    print(f"       - {f}")
             if extra:
-                print(f"     ⚠️  额外的文件 ({len(extra)}):")
+                print(f"     [WARN] 额外的文件 ({len(extra)}):")
                 for f in sorted(extra):
-                    print(f"       • {f}")
+                    print(f"       - {f}")
             if not missing and not extra:
-                print(f"     ✅ 所有文件都已处理!")
+                print(f"     [OK] 所有文件都已处理!")
         except Exception as e:
-            print(f"     ⚠️  无法获取预期文件列表: {e}")
+            print(f"     [WARN] 无法获取预期文件列表: {e}")
         print()
         # ========== 调试信息结束 ==========
         
         tmp_files = sorted(glob.glob(os.path.join(self.temp_dir, "*.pred.tmp")))
         if not tmp_files:
-            print("  ⚠️  警告: 未找到临时预测文件")
+            print("  [WARN] 未找到临时预测文件")
             return
             
         # 按 bin 文件分组
         bin_file_groups = self._group_temp_files(tmp_files)
-        print(f"  📁 检测到 {len(bin_file_groups)} 个唯一 bin 文件")
+        print(f"  检测到 {len(bin_file_groups)} 个唯一 bin 文件")
         
         try:
             for idx, (bin_basename, file_list) in enumerate(bin_file_groups.items(), 1):
@@ -1045,9 +1080,9 @@ class SemanticPredictLasWriter(BasePredictionWriter):
                 print(f"  │  批次数: {len(file_list)}")
                 try:
                     self._process_single_bin_file(bin_basename, file_list, trainer, pl_module)
-                    print(f"  └─ ✅ 完成")
+                    print(f"  └─ [OK] 完成")
                 except Exception as e:
-                    print(f"  └─ ❌ 错误: {e}")
+                    print(f"  └─ [ERROR] 错误: {e}")
                     import traceback
                     traceback.print_exc()
         finally:
@@ -1056,12 +1091,12 @@ class SemanticPredictLasWriter(BasePredictionWriter):
         # 最终统计
         print()
         print("╔" + "═" * 68 + "╗")
-        print("║" + " 🎉 预测完成!".center(58) + "║")
+        print("║" + " 预测完成!".center(58) + "║")
         print("╠" + "═" * 68 + "╣")
-        print(f"║  📊 总批次数: {self._stats['total_batches']:<51} ║")
-        print(f"║  📊 总点数: {self._stats['total_points']:,}".ljust(55) + "║")
-        print(f"║  📁 输出文件: {len(bin_file_groups)} 个 LAS 文件".ljust(55) + "║")
-        print(f"║  📂 输出目录: {self.output_dir[:50]:<50} ║")
+        print(f"║  总批次数: {self._stats['total_batches']:<51} ║")
+        print(f"║  总点数: {self._stats['total_points']:,}".ljust(55) + "║")
+        print(f"║  输出文件: {len(bin_file_groups)} 个 LAS 文件".ljust(55) + "║")
+        print(f"║  输出目录: {self.output_dir[:50]:<50} ║")
         print("╚" + "═" * 68 + "╝")
         print()
 
@@ -1100,14 +1135,14 @@ class SemanticPredictLasWriter(BasePredictionWriter):
             else:
                 print(f"  ℹ️  未找到 class_mapping，使用连续标签")
         except Exception as e:
-            print(f"  ⚠️  警告: 无法推断 reverse_class_mapping: {e}")
+            print(f"  [WARN] 无法推断 reverse_class_mapping: {e}")
 
     def _validate_prediction(self, prediction, batch_idx):
         if 'logits' not in prediction or 'indices' not in prediction:
-            print(f"  ⚠️  警告: predict_step 必须返回 'logits' 和 'indices'。跳过批次 {batch_idx}")
+            print(f"  [WARN] predict_step 必须返回 'logits' 和 'indices'。跳过批次 {batch_idx}")
             return False
         if 'bin_file' not in prediction or len(prediction['bin_file']) == 0:
-            print(f"  ⚠️  警告: batch {batch_idx} 缺少 bin_file 信息，跳过")
+            print(f"  [WARN] batch {batch_idx} 缺少 bin_file 信息，跳过")
             return False
         return True
 
@@ -1168,7 +1203,7 @@ class SemanticPredictLasWriter(BasePredictionWriter):
                 self.num_classes = pl_module.num_classes
             print(f"  ℹ️  从模型推断类别数: {self.num_classes}")
         except Exception:
-            print("  ❌ 错误: 无法从模型推断 num_classes，请显式指定")
+            print("  [ERROR] 无法从模型推断 num_classes，请显式指定")
 
     def _group_temp_files(self, tmp_files):
         groups = defaultdict(list)
@@ -1184,15 +1219,15 @@ class SemanticPredictLasWriter(BasePredictionWriter):
             try:
                 if os.path.exists(f): os.remove(f)
             except Exception as e:
-                print(f"  ⚠️  警告: 无法删除 {f}: {e}")
+                print(f"  [WARN] 无法删除 {f}: {e}")
         
         try:
             import shutil
             if os.path.exists(self.temp_dir):
                 shutil.rmtree(self.temp_dir)
-                print(f"  ✅ 已清理临时文件夹")
+                print(f"  [OK] 已清理临时文件夹")
         except Exception as e:
-            print(f"  ⚠️  警告: 清理文件夹失败: {e}")
+            print(f"  [WARN] 清理文件夹失败: {e}")
 
     def _process_single_bin_file(self, bin_basename, tmp_files, trainer, pl_module):
         """处理单个 bin 文件的所有预测结果"""
@@ -1280,7 +1315,7 @@ class SemanticPredictLasWriter(BasePredictionWriter):
             return None, None
             
         except Exception as e:
-            print(f"  ❌ 错误: 查找 bin/pkl 文件失败: {e}")
+            print(f"  [ERROR] 查找 bin/pkl 文件失败: {e}")
             return None, None
 
     def _perform_voting(self, tmp_files, num_points, pl_module):
@@ -1294,7 +1329,7 @@ class SemanticPredictLasWriter(BasePredictionWriter):
                 logits_sum.index_add_(0, d['indices'].long(), d['logits'].float())
                 counts.index_add_(0, d['indices'].long(), torch.ones(len(d['indices']), dtype=torch.int32))
             except Exception as e:
-                print(f"  ⚠️  警告: 加载 {f} 失败: {e}")
+                print(f"  [WARN] 加载 {f} 失败: {e}")
                 
         # 计算平均
         mask = (counts == 0)
@@ -1425,7 +1460,7 @@ class SemanticPredictLasWriter(BasePredictionWriter):
             las.write(las_path)
             
         except Exception as e:
-            print(f"  ❌ 错误: 保存 LAS 文件失败: {e}")
+            print(f"  [ERROR] 保存 LAS 文件失败: {e}")
             import traceback
             traceback.print_exc()
             raise

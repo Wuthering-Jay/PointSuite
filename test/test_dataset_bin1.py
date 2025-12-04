@@ -1,13 +1,13 @@
 """
-测试 BinPklDataset1 �?BinPklDataModule1 的功�?
+测试 BinPklDataset1 �?BinPklDataModule1 的功�?
 
-测试内容�?
+测试内容�?
 1. 全量模式和体素模式的基本功能
-2. train/val 随机采样 vs test/predict 模运算采�?
-3. 点云全覆盖验�?
-4. 动态批处理兼容�?
-5. 类别映射和类别权�?
-6. 速度测试（单样本、多样本随机、动态批处理�?
+2. train/val 随机采样 vs test/predict 模运算采�?
+3. 点云全覆盖验�?
+4. 动态批处理兼容�?
+5. 类别映射和类别权�?
+6. 速度测试（单样本、多样本随机、动态批处理�?
 """
 
 import os
@@ -79,12 +79,12 @@ def test_dataset_basic(pkl_path: str, mode: str = 'voxel'):
             max_loops=5 if split in ['test', 'predict'] else None
         )
         
-        print(f"  {Colors.DIM}├─{Colors.RESET} 样本�? {Colors.CYAN}{len(dataset)}{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 样本�? {Colors.CYAN}{len(dataset)}{Colors.RESET}")
         print(f"  {Colors.DIM}├─{Colors.RESET} 原始数据列表长度: {Colors.CYAN}{len(dataset.data_list)}{Colors.RESET}")
         
-        # 获取第一个样�?
+        # 获取第一个样�?
         sample = dataset[0]
-        print(f"  {Colors.DIM}├─{Colors.RESET} 样本 0 �?keys: {list(sample.keys())}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 样本 0 �?keys: {list(sample.keys())}")
         print(f"  {Colors.DIM}├─{Colors.RESET} coord shape: {sample['coord'].shape}")
         
         if 'intensity' in sample:
@@ -99,18 +99,18 @@ def test_dataset_basic(pkl_path: str, mode: str = 'voxel'):
             if 'loop_idx' in sample:
                 print(f"  {Colors.DIM}├─{Colors.RESET} loop_idx: {sample['loop_idx']}")
         
-        print(f"  {Colors.DIM}└─{Colors.RESET} {Colors.GREEN}�?通过{Colors.RESET}")
+        print(f"  {Colors.DIM}└─{Colors.RESET} {Colors.GREEN}�?通过{Colors.RESET}")
     
     return True
 
 
 # ============================================================================
-# 测试2: 体素模式全覆盖测�?
+# 测试2: 体素模式全覆盖测�?
 # ============================================================================
 
 def test_voxel_full_coverage(pkl_path: str, max_loops: Optional[int] = None):
     """
-    测试体素模式�?test split 是否覆盖所有点
+    测试体素模式�?test split 是否覆盖所有点
     """
     print(f"\n{Colors.BOLD}{'='*70}{Colors.RESET}")
     print(f"{Colors.BOLD}{Colors.CYAN}  🔄 测试2: 体素模式全覆盖测试{Colors.RESET}")
@@ -128,10 +128,10 @@ def test_voxel_full_coverage(pkl_path: str, max_loops: Optional[int] = None):
     total_original_points = metadata['num_points']
     segments = metadata['segments']
     
-    print(f"  {Colors.DIM}├─{Colors.RESET} 原始总点�? {Colors.CYAN}{format_number(total_original_points)}{Colors.RESET}")
-    print(f"  {Colors.DIM}├─{Colors.RESET} Segments �? {Colors.CYAN}{len(segments)}{Colors.RESET}")
+    print(f"  {Colors.DIM}├─{Colors.RESET} 原始总点�? {Colors.CYAN}{format_number(total_original_points)}{Colors.RESET}")
+    print(f"  {Colors.DIM}├─{Colors.RESET} Segments �? {Colors.CYAN}{len(segments)}{Colors.RESET}")
     
-    # 创建 test 数据�?
+    # 创建 test 数据�?
     dataset = BinPklDataset1(
         data_root=pkl_path,
         split='test',
@@ -168,13 +168,13 @@ def test_voxel_full_coverage(pkl_path: str, max_loops: Optional[int] = None):
     unique_sampled = np.unique(all_sampled)
     
     print(f"  {Colors.DIM}├─{Colors.RESET} 总采样数: {Colors.CYAN}{format_number(len(all_sampled))}{Colors.RESET}")
-    print(f"  {Colors.DIM}├─{Colors.RESET} 唯一采样�? {Colors.CYAN}{format_number(len(unique_sampled))}{Colors.RESET}")
+    print(f"  {Colors.DIM}├─{Colors.RESET} 唯一采样�? {Colors.CYAN}{format_number(len(unique_sampled))}{Colors.RESET}")
     
     coverage = len(unique_sampled) / total_original_points * 100
     if coverage >= 99.99:
-        print(f"  {Colors.DIM}├─{Colors.RESET} 覆盖�? {Colors.GREEN}{format_percent(coverage)} ✓{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 覆盖率: {Colors.GREEN}{format_percent(coverage)} [OK]{Colors.RESET}")
     else:
-        print(f"  {Colors.DIM}├─{Colors.RESET} 覆盖�? {Colors.RED}{format_percent(coverage)}{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 覆盖率: {Colors.RED}{format_percent(coverage)}{Colors.RESET}")
     
     # 重复采样统计
     repeat_total = len(all_sampled) - len(unique_sampled)
@@ -186,14 +186,14 @@ def test_voxel_full_coverage(pkl_path: str, max_loops: Optional[int] = None):
     if sample_counter:
         counts = list(sample_counter.values())
         print(f"  {Colors.DIM}├─{Colors.RESET} 平均采样次数: {Colors.YELLOW}{np.mean(counts):.2f}{Colors.RESET}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} 最大采样次�? {Colors.YELLOW}{max(counts)}{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 最大采样次�? {Colors.YELLOW}{max(counts)}{Colors.RESET}")
         
         # 分布
         count_dist = Counter(counts)
         print(f"\n  {Colors.BOLD}📈 采样次数分布:{Colors.RESET}")
         for cnt, num in sorted(count_dist.items())[:5]:
             pct = num / len(counts) * 100
-            print(f"  {Colors.DIM}│{Colors.RESET}   采样 {cnt} �? {format_number(num)} �?({format_percent(pct)})")
+            print(f"  {Colors.DIM}│{Colors.RESET}   采样 {cnt} �? {format_number(num)} �?({format_percent(pct)})")
     
     passed = coverage >= 99.99
     return {
@@ -205,12 +205,12 @@ def test_voxel_full_coverage(pkl_path: str, max_loops: Optional[int] = None):
 
 
 # ============================================================================
-# 测试3: 动态批处理兼容�?
+# 测试3: 动态批处理兼容�?
 # ============================================================================
 
 def test_dynamic_batch_compatibility(pkl_path: str):
     """
-    测试�?DynamicBatchSampler 的兼容�?
+    测试�?DynamicBatchSampler 的兼容�?
     """
     print(f"\n{Colors.BOLD}{'='*70}{Colors.RESET}")
     print(f"{Colors.BOLD}{Colors.CYAN}  📦 测试3: 动态批处理兼容性{Colors.RESET}")
@@ -232,7 +232,7 @@ def test_dynamic_batch_compatibility(pkl_path: str):
         # 获取样本点数列表
         sample_num_points = dataset.get_sample_num_points()
         
-        print(f"  {Colors.DIM}├─{Colors.RESET} 样本�? {Colors.CYAN}{len(sample_num_points)}{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 样本�? {Colors.CYAN}{len(sample_num_points)}{Colors.RESET}")
         print(f"  {Colors.DIM}├─{Colors.RESET} 点数范围: [{min(sample_num_points):,}, {max(sample_num_points):,}]")
         print(f"  {Colors.DIM}├─{Colors.RESET} 平均点数: {np.mean(sample_num_points):,.1f}")
         
@@ -257,10 +257,10 @@ def test_dynamic_batch_compatibility(pkl_path: str):
         batch_sizes = [len(b) for b in batches]
         batch_points = [sum(sample_num_points[i] for i in b) for b in batches]
         
-        print(f"  {Colors.DIM}├─{Colors.RESET} 批次�?(max_points={max_points}): {Colors.CYAN}{len(batches)}{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 批次�?(max_points={max_points}): {Colors.CYAN}{len(batches)}{Colors.RESET}")
         print(f"  {Colors.DIM}├─{Colors.RESET} 批次大小范围: [{min(batch_sizes)}, {max(batch_sizes)}]")
         print(f"  {Colors.DIM}├─{Colors.RESET} 批次点数范围: [{min(batch_points):,}, {max(batch_points):,}]")
-        print(f"  {Colors.DIM}└─{Colors.RESET} {Colors.GREEN}�?通过{Colors.RESET}")
+        print(f"  {Colors.DIM}└─{Colors.RESET} {Colors.GREEN}�?通过{Colors.RESET}")
     
     return True
 
@@ -285,20 +285,20 @@ def test_datamodule(pkl_path: str):
         val_data=pkl_path,
         test_data=pkl_path,
         batch_size=4,
-        num_workers=0,  # 测试时使�?0
+        num_workers=0,  # 测试时使�?0
         mode='grid',
         max_loops=5,
         assets=['coord', 'intensity', 'class'],
     )
     
-    # 设置数据�?
+    # 设置数据�?
     datamodule.setup('fit')
     datamodule.setup('test')
     
     print(f"\n  {Colors.BOLD}📊 DataModule 信息:{Colors.RESET}")
-    print(f"  {Colors.DIM}├─{Colors.RESET} 训练样本�? {Colors.CYAN}{len(datamodule.train_dataset)}{Colors.RESET}")
-    print(f"  {Colors.DIM}├─{Colors.RESET} 验证样本�? {Colors.CYAN}{len(datamodule.val_dataset)}{Colors.RESET}")
-    print(f"  {Colors.DIM}├─{Colors.RESET} 测试样本�? {Colors.CYAN}{len(datamodule.test_dataset)}{Colors.RESET}")
+    print(f"  {Colors.DIM}├─{Colors.RESET} 训练样本�? {Colors.CYAN}{len(datamodule.train_dataset)}{Colors.RESET}")
+    print(f"  {Colors.DIM}├─{Colors.RESET} 验证样本�? {Colors.CYAN}{len(datamodule.val_dataset)}{Colors.RESET}")
+    print(f"  {Colors.DIM}├─{Colors.RESET} 测试样本�? {Colors.CYAN}{len(datamodule.test_dataset)}{Colors.RESET}")
     
     # 测试 DataLoader
     train_loader = datamodule.train_dataloader()
@@ -307,7 +307,7 @@ def test_datamodule(pkl_path: str):
     
     print(f"\n  {Colors.BOLD}📦 DataLoader 测试:{Colors.RESET}")
     
-    # 测试一�?batch
+    # 测试一�?batch
     for name, loader in [('train', train_loader), ('val', val_loader), ('test', test_loader)]:
         batch = next(iter(loader))
         print(f"  {Colors.DIM}├─{Colors.RESET} {name} batch:")
@@ -315,21 +315,21 @@ def test_datamodule(pkl_path: str):
         if 'offset' in batch:
             print(f"  {Colors.DIM}│{Colors.RESET}   - offset: {batch['offset']}")
     
-    print(f"\n  {Colors.DIM}└─{Colors.RESET} {Colors.GREEN}�?通过{Colors.RESET}")
+    print(f"\n  {Colors.DIM}└─{Colors.RESET} {Colors.GREEN}�?通过{Colors.RESET}")
     
     return True
 
 
 # ============================================================================
-# 测试5: 类别映射和权�?
+# 测试5: 类别映射和权�?
 # ============================================================================
 
 def test_class_mapping(pkl_path: str):
     """
-    测试类别映射和类别权重功�?
+    测试类别映射和类别权重功�?
     """
     print(f"\n{Colors.BOLD}{'='*70}{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.CYAN}  🏷�?测试5: 类别映射和权重{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.CYAN}  🏷�?测试5: 类别映射和权重{Colors.RESET}")
     print(f"{Colors.BOLD}{'='*70}{Colors.RESET}")
     
     from pointsuite.data.datasets.dataset_bin1 import BinPklDataset1
@@ -361,30 +361,30 @@ def test_class_mapping(pkl_path: str):
     )
     
     mapped_dist = dataset_mapped.get_class_distribution()
-    print(f"\n  {Colors.BOLD}📊 映射后类别分�?{Colors.RESET}")
+    print(f"\n  {Colors.BOLD}📊 映射后类别分�?{Colors.RESET}")
     for cls, count in sorted(mapped_dist.items()):
         print(f"  {Colors.DIM}├─{Colors.RESET} 类别 {cls}: {format_number(count)}")
     
     # 测试类别权重
     weights = dataset_mapped.class_weights
-    print(f"\n  {Colors.BOLD}⚖️ 类别权重:{Colors.RESET}")
+    print(f"\n  {Colors.BOLD}类别权重:{Colors.RESET}")
     if weights is not None:
         print(f"  {Colors.DIM}├─{Colors.RESET} 权重 shape: {weights.shape}")
         for i, w in enumerate(weights):
             print(f"  {Colors.DIM}│{Colors.RESET}   类别 {i}: {w:.4f}")
     
-    print(f"\n  {Colors.DIM}└─{Colors.RESET} {Colors.GREEN}�?通过{Colors.RESET}")
+    print(f"\n  {Colors.DIM}└─{Colors.RESET} {Colors.GREEN}�?通过{Colors.RESET}")
     
     return True
 
 
 # ============================================================================
-# 测试6: train �?test 模式对比
+# 测试6: train �?test 模式对比
 # ============================================================================
 
 def test_train_vs_test_sampling(pkl_path: str):
     """
-    对比 train �?test 模式的采样差�?
+    对比 train �?test 模式的采样差�?
     """
     print(f"\n{Colors.BOLD}{'='*70}{Colors.RESET}")
     print(f"{Colors.BOLD}{Colors.CYAN}  🔀 测试6: Train vs Test 采样对比{Colors.RESET}")
@@ -410,24 +410,24 @@ def test_train_vs_test_sampling(pkl_path: str):
     )
     
     print(f"\n  {Colors.BOLD}📊 对比:{Colors.RESET}")
-    print(f"  {Colors.DIM}├─{Colors.RESET} Train 样本�? {Colors.CYAN}{len(dataset_train)}{Colors.RESET}")
-    print(f"  {Colors.DIM}├─{Colors.RESET} Test 样本�? {Colors.CYAN}{len(dataset_test)}{Colors.RESET}")
+    print(f"  {Colors.DIM}├─{Colors.RESET} Train 样本�? {Colors.CYAN}{len(dataset_train)}{Colors.RESET}")
+    print(f"  {Colors.DIM}├─{Colors.RESET} Test 样本�? {Colors.CYAN}{len(dataset_test)}{Colors.RESET}")
     print(f"  {Colors.DIM}├─{Colors.RESET} 比例: {Colors.YELLOW}{len(dataset_test) / len(dataset_train):.2f}x{Colors.RESET}")
     
-    # 检�?train 的随机�?
-    print(f"\n  {Colors.BOLD}🎲 Train 随机性验�?{Colors.RESET}")
+    # 检�?train 的随机�?
+    print(f"\n  {Colors.BOLD}🎲 Train 随机性验�?{Colors.RESET}")
     sample1 = dataset_train[0]
-    sample2 = dataset_train[0]  # 再次获取同一个样�?
+    sample2 = dataset_train[0]  # 再次获取同一个样�?
     
-    # 检查坐标是否不同（随机采样�?
+    # 检查坐标是否不同（随机采样�?
     coords_same = np.allclose(sample1['coord'], sample2['coord'])
     if not coords_same:
-        print(f"  {Colors.DIM}├─{Colors.RESET} 两次采样结果不同: {Colors.GREEN}�?(随机采样正常){Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 两次采样结果不同: {Colors.GREEN}�?(随机采样正常){Colors.RESET}")
     else:
-        print(f"  {Colors.DIM}├─{Colors.RESET} 两次采样结果相同: {Colors.YELLOW}! (可能是缓存或确定性采�?{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 两次采样结果相同: {Colors.YELLOW}! (可能是缓存或确定性采�?{Colors.RESET}")
     
-    # 检�?test 的确定�?
-    print(f"\n  {Colors.BOLD}🔒 Test 确定性验�?{Colors.RESET}")
+    # 检�?test 的确定�?
+    print(f"\n  {Colors.BOLD}🔒 Test 确定性验�?{Colors.RESET}")
     # Test 模式下同一索引应该返回相同结果
     test_sample1 = dataset_test._load_data(0)
     test_sample2 = dataset_test._load_data(0)
@@ -435,11 +435,11 @@ def test_train_vs_test_sampling(pkl_path: str):
     if 'indices' in test_sample1 and 'indices' in test_sample2:
         indices_same = np.array_equal(test_sample1['indices'], test_sample2['indices'])
         if indices_same:
-            print(f"  {Colors.DIM}├─{Colors.RESET} 两次采样索引相同: {Colors.GREEN}�?(模运算确定性正�?{Colors.RESET}")
+            print(f"  {Colors.DIM}├─{Colors.RESET} 两次采样索引相同: {Colors.GREEN}�?(模运算确定性正�?{Colors.RESET}")
         else:
-            print(f"  {Colors.DIM}├─{Colors.RESET} 两次采样索引不同: {Colors.RED}�?(应该相同){Colors.RESET}")
+            print(f"  {Colors.DIM}├─{Colors.RESET} 两次采样索引不同: {Colors.RED}�?(应该相同){Colors.RESET}")
     
-    print(f"\n  {Colors.DIM}└─{Colors.RESET} {Colors.GREEN}�?通过{Colors.RESET}")
+    print(f"\n  {Colors.DIM}└─{Colors.RESET} {Colors.GREEN}�?通过{Colors.RESET}")
     
     return True
 
@@ -453,7 +453,7 @@ def test_speed_single_sample(pkl_path: str, n_iterations: int = 100):
     单样本采样速度测试
     """
     print(f"\n{Colors.BOLD}{'='*70}{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.CYAN}  �?测试7a: 单样本采样速度测试{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.CYAN}  �?测试7a: 单样本采样速度测试{Colors.RESET}")
     print(f"{Colors.BOLD}{'='*70}{Colors.RESET}")
     
     from pointsuite.data.datasets.dataset_bin1 import BinPklDataset1
@@ -498,9 +498,9 @@ def test_speed_single_sample(pkl_path: str, n_iterations: int = 100):
             
             print(f"  {Colors.DIM}├─{Colors.RESET} 迭代次数: {n_iterations}")
             print(f"  {Colors.DIM}├─{Colors.RESET} 平均时间: {Colors.CYAN}{format_time(avg_time)}{Colors.RESET} ± {format_time(std_time)}")
-            print(f"  {Colors.DIM}├─{Colors.RESET} 最�?最�? {format_time(min_time)} / {format_time(max_time)}")
+            print(f"  {Colors.DIM}├─{Colors.RESET} 最�?最�? {format_time(min_time)} / {format_time(max_time)}")
             print(f"  {Colors.DIM}├─{Colors.RESET} 平均点数: {avg_points:,.0f}")
-            print(f"  {Colors.DIM}├─{Colors.RESET} 吞吐�? {Colors.GREEN}{1/avg_time:.1f} samples/s{Colors.RESET}")
+            print(f"  {Colors.DIM}├─{Colors.RESET} 吞吐�? {Colors.GREEN}{1/avg_time:.1f} samples/s{Colors.RESET}")
             
             key = f"{mode}_{split}"
             results[key] = {
@@ -514,15 +514,15 @@ def test_speed_single_sample(pkl_path: str, n_iterations: int = 100):
 
 def test_speed_random_access(pkl_path: str, n_iterations: int = 500):
     """
-    多文件随机访问速度测试（模�?DataLoader 行为�?
+    多文件随机访问速度测试（模�?DataLoader 行为�?
     """
     print(f"\n{Colors.BOLD}{'='*70}{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.CYAN}  �?测试7b: 随机访问速度测试{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.CYAN}  �?测试7b: 随机访问速度测试{Colors.RESET}")
     print(f"{Colors.BOLD}{'='*70}{Colors.RESET}")
     
     from pointsuite.data.datasets.dataset_bin import BinPklDataset
     
-    # 创建 train �?test 数据�?
+    # 创建 train �?test 数据�?
     dataset_train = BinPklDataset(
         data_root=pkl_path,
         split='train',
@@ -562,10 +562,10 @@ def test_speed_random_access(pkl_path: str, n_iterations: int = 500):
         avg_time = total_time / n_iterations
         
         print(f"  {Colors.DIM}├─{Colors.RESET} 迭代次数: {n_iterations}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} 总时�? {Colors.CYAN}{format_time(total_time)}{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 总时�? {Colors.CYAN}{format_time(total_time)}{Colors.RESET}")
         print(f"  {Colors.DIM}├─{Colors.RESET} 平均时间: {Colors.CYAN}{format_time(avg_time)}{Colors.RESET}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} 总点�? {format_number(total_points)}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} 吞吐�? {Colors.GREEN}{1/avg_time:.1f} samples/s{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 总点�? {format_number(total_points)}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 吞吐�? {Colors.GREEN}{1/avg_time:.1f} samples/s{Colors.RESET}")
         print(f"  {Colors.DIM}└─{Colors.RESET} 点吞吐量: {Colors.GREEN}{total_points/total_time/1e6:.2f} M points/s{Colors.RESET}")
         
         results[name] = {
@@ -580,10 +580,10 @@ def test_speed_random_access(pkl_path: str, n_iterations: int = 500):
 
 def test_speed_dataloader(pkl_path: str, n_batches: int = 50):
     """
-    DataLoader 速度测试（包括动态批处理�?
+    DataLoader 速度测试（包括动态批处理�?
     """
     print(f"\n{Colors.BOLD}{'='*70}{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.CYAN}  �?测试7c: DataLoader 速度测试{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.CYAN}  �?测试7c: DataLoader 速度测试{Colors.RESET}")
     print(f"{Colors.BOLD}{'='*70}{Colors.RESET}")
     
     from pointsuite.data.datamodule_bin1 import BinPklDataModule1
@@ -637,12 +637,12 @@ def test_speed_dataloader(pkl_path: str, n_batches: int = 50):
         total_time = t1 - t0
         avg_batch_time = total_time / batch_count
         
-        print(f"  {Colors.DIM}├─{Colors.RESET} 批次�? {batch_count}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} 总时�? {Colors.CYAN}{format_time(total_time)}{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 批次�? {batch_count}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 总时�? {Colors.CYAN}{format_time(total_time)}{Colors.RESET}")
         print(f"  {Colors.DIM}├─{Colors.RESET} 平均批次时间: {Colors.CYAN}{format_time(avg_batch_time)}{Colors.RESET}")
         print(f"  {Colors.DIM}├─{Colors.RESET} 批次大小范围: [{min(batch_sizes):,}, {max(batch_sizes):,}]")
         print(f"  {Colors.DIM}├─{Colors.RESET} 平均批次点数: {np.mean(batch_sizes):,.0f}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} 批次吞吐�? {Colors.GREEN}{batch_count/total_time:.1f} batches/s{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 批次吞吐�? {Colors.GREEN}{batch_count/total_time:.1f} batches/s{Colors.RESET}")
         print(f"  {Colors.DIM}└─{Colors.RESET} 点吞吐量: {Colors.GREEN}{total_points/total_time/1e6:.2f} M points/s{Colors.RESET}")
         
         results[config['name']] = {
@@ -657,10 +657,10 @@ def test_speed_dataloader(pkl_path: str, n_batches: int = 50):
 
 def test_speed_comparison(pkl_path: str):
     """
-    速度对比测试：Numba vs �?Python（如果可用）
+    速度对比测试：Numba vs �?Python（如果可用）
     """
     print(f"\n{Colors.BOLD}{'='*70}{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.CYAN}  �?测试7d: 采样函数性能分析{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.CYAN}  �?测试7d: 采样函数性能分析{Colors.RESET}")
     print(f"{Colors.BOLD}{'='*70}{Colors.RESET}")
     
     from pointsuite.data.datasets.dataset_bin1 import BinPklDataset1
@@ -673,7 +673,7 @@ def test_speed_comparison(pkl_path: str):
         assets=['coord'],
     )
     
-    # 获取一�?segment 进行测试
+    # 获取一�?segment 进行测试
     metadata = dataset._get_metadata(dataset.data_list[0]['pkl_path'])
     segment_info = metadata['segments'][0]
     mmap_data = dataset._get_mmap(
@@ -685,8 +685,8 @@ def test_speed_comparison(pkl_path: str):
     n_points = segment_info['num_points']
     
     print(f"\n  {Colors.BOLD}📊 测试样本信息:{Colors.RESET}")
-    print(f"  {Colors.DIM}├─{Colors.RESET} 体素�? {n_voxels:,}")
-    print(f"  {Colors.DIM}├─{Colors.RESET} 总点�? {n_points:,}")
+    print(f"  {Colors.DIM}├─{Colors.RESET} 体素�? {n_voxels:,}")
+    print(f"  {Colors.DIM}├─{Colors.RESET} 总点�? {n_points:,}")
     
     # 预热 Numba
     _ = dataset._voxel_random_sample(segment_info, mmap_data)
@@ -695,7 +695,7 @@ def test_speed_comparison(pkl_path: str):
     # 测试随机采样
     n_iterations = 1000
     
-    print(f"\n  {Colors.BOLD}🎲 随机采样测试 ({n_iterations} �?:{Colors.RESET}")
+    print(f"\n  {Colors.BOLD}🎲 随机采样测试 ({n_iterations} �?:{Colors.RESET}")
     
     times = []
     for _ in range(n_iterations):
@@ -707,10 +707,10 @@ def test_speed_comparison(pkl_path: str):
     avg_time = np.mean(times)
     print(f"  {Colors.DIM}├─{Colors.RESET} 平均时间: {Colors.CYAN}{format_time(avg_time)}{Colors.RESET}")
     print(f"  {Colors.DIM}├─{Colors.RESET} 每体素耗时: {Colors.CYAN}{avg_time/n_voxels*1e9:.1f} ns{Colors.RESET}")
-    print(f"  {Colors.DIM}└─{Colors.RESET} 吞吐�? {Colors.GREEN}{n_voxels/avg_time/1e6:.2f} M voxels/s{Colors.RESET}")
+    print(f"  {Colors.DIM}└─{Colors.RESET} 吞吐�? {Colors.GREEN}{n_voxels/avg_time/1e6:.2f} M voxels/s{Colors.RESET}")
     
-    # 测试模运算采�?
-    print(f"\n  {Colors.BOLD}🔄 模运算采样测�?({n_iterations} �?:{Colors.RESET}")
+    # 测试模运算采�?
+    print(f"\n  {Colors.BOLD}🔄 模运算采样测�?({n_iterations} �?:{Colors.RESET}")
     
     times = []
     for _ in range(n_iterations):
@@ -722,17 +722,17 @@ def test_speed_comparison(pkl_path: str):
     avg_time = np.mean(times)
     print(f"  {Colors.DIM}├─{Colors.RESET} 平均时间: {Colors.CYAN}{format_time(avg_time)}{Colors.RESET}")
     print(f"  {Colors.DIM}├─{Colors.RESET} 每体素耗时: {Colors.CYAN}{avg_time/n_voxels*1e9:.1f} ns{Colors.RESET}")
-    print(f"  {Colors.DIM}└─{Colors.RESET} 吞吐�? {Colors.GREEN}{n_voxels/avg_time/1e6:.2f} M voxels/s{Colors.RESET}")
+    print(f"  {Colors.DIM}└─{Colors.RESET} 吞吐�? {Colors.GREEN}{n_voxels/avg_time/1e6:.2f} M voxels/s{Colors.RESET}")
     
     return True
 
 
 def test_speed_multi_workers(pkl_path: str, n_batches: int = 50):
     """
-    测试不同 num_workers �?DataLoader 速度的影�?
+    测试不同 num_workers �?DataLoader 速度的影�?
     """
     print(f"\n{Colors.BOLD}{'='*70}{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.CYAN}  �?测试7e: �?Workers 速度测试{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.CYAN}  �?测试7e: �?Workers 速度测试{Colors.RESET}")
     print(f"{Colors.BOLD}{'='*70}{Colors.RESET}")
     
     from pointsuite.data.datamodule_bin1 import BinPklDataModule1
@@ -742,7 +742,7 @@ def test_speed_multi_workers(pkl_path: str, n_batches: int = 50):
     worker_counts = [0, 1, 2, 4] + ([max_workers] if max_workers > 4 else [])
     worker_counts = sorted(set(worker_counts))
     
-    print(f"\n  {Colors.DIM}CPU 核心�? {multiprocessing.cpu_count()}{Colors.RESET}")
+    print(f"\n  {Colors.DIM}CPU 核心�? {multiprocessing.cpu_count()}{Colors.RESET}")
     print(f"  {Colors.DIM}测试 workers: {worker_counts}{Colors.RESET}")
     
     results = {}
@@ -787,9 +787,9 @@ def test_speed_multi_workers(pkl_path: str, n_batches: int = 50):
             total_time = t1 - t0
             points_per_sec = total_points / total_time
             
-            print(f"  {Colors.DIM}├─{Colors.RESET} 批次�? {batch_count}")
-            print(f"  {Colors.DIM}├─{Colors.RESET} 总时�? {Colors.CYAN}{format_time(total_time)}{Colors.RESET}")
-            print(f"  {Colors.DIM}└─{Colors.RESET} 吞吐�? {Colors.GREEN}{points_per_sec/1e6:.2f} M points/s{Colors.RESET}")
+            print(f"  {Colors.DIM}├─{Colors.RESET} 批次�? {batch_count}")
+            print(f"  {Colors.DIM}├─{Colors.RESET} 总时�? {Colors.CYAN}{format_time(total_time)}{Colors.RESET}")
+            print(f"  {Colors.DIM}└─{Colors.RESET} 吞吐�? {Colors.GREEN}{points_per_sec/1e6:.2f} M points/s{Colors.RESET}")
             
             results[f'workers_{num_workers}'] = {
                 'total_time': total_time,
@@ -798,7 +798,7 @@ def test_speed_multi_workers(pkl_path: str, n_batches: int = 50):
             }
             
         except Exception as e:
-            print(f"  {Colors.RED}�?失败: {e}{Colors.RESET}")
+            print(f"  {Colors.RED}�?失败: {e}{Colors.RESET}")
             results[f'workers_{num_workers}'] = {'error': str(e)}
     
     # 对比分析
@@ -822,7 +822,7 @@ def test_speed_multi_files(data_dir: str, n_iterations: int = 100):
     测试多文件（全目录）读取速度
     """
     print(f"\n{Colors.BOLD}{'='*70}{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.CYAN}  �?测试7f: 多文件速度测试{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.CYAN}  �?测试7f: 多文件速度测试{Colors.RESET}")
     print(f"{Colors.BOLD}{'='*70}{Colors.RESET}")
     
     from pointsuite.data.datasets.dataset_bin1 import BinPklDataset1
@@ -831,15 +831,15 @@ def test_speed_multi_files(data_dir: str, n_iterations: int = 100):
     pkl_files = list(data_path.glob('*.pkl'))
     
     print(f"\n  {Colors.DIM}数据目录: {data_dir}{Colors.RESET}")
-    print(f"  {Colors.DIM}pkl 文件�? {len(pkl_files)}{Colors.RESET}")
+    print(f"  {Colors.DIM}pkl 文件�? {len(pkl_files)}{Colors.RESET}")
     
     if len(pkl_files) == 0:
-        print(f"  {Colors.RED}未找�?pkl 文件{Colors.RESET}")
+        print(f"  {Colors.RED}未找�?pkl 文件{Colors.RESET}")
         return {}
     
     results = {}
     
-    # 测试不同模式�?split 组合
+    # 测试不同模式�?split 组合
     test_configs = [
         {'mode': 'voxel', 'split': 'train', 'name': 'voxel_train'},
         {'mode': 'voxel', 'split': 'test', 'name': 'voxel_test'},
@@ -847,7 +847,7 @@ def test_speed_multi_files(data_dir: str, n_iterations: int = 100):
     ]
     
     for config in test_configs:
-        print(f"\n  {Colors.BOLD}📊 {config['name']} (全目�?{len(pkl_files)} 个文�?{Colors.RESET}")
+        print(f"\n  {Colors.BOLD}📊 {config['name']} (全目�?{len(pkl_files)} 个文�?{Colors.RESET}")
         
         try:
             t_load_start = time.perf_counter()
@@ -888,9 +888,9 @@ def test_speed_multi_files(data_dir: str, n_iterations: int = 100):
             total_time = t1 - t0
             avg_time = total_time / actual_iterations
             
-            print(f"  {Colors.DIM}├─{Colors.RESET} 随机访问 {actual_iterations} �? {Colors.CYAN}{format_time(total_time)}{Colors.RESET}")
+            print(f"  {Colors.DIM}├─{Colors.RESET} 随机访问 {actual_iterations} �? {Colors.CYAN}{format_time(total_time)}{Colors.RESET}")
             print(f"  {Colors.DIM}├─{Colors.RESET} 平均时间: {Colors.CYAN}{format_time(avg_time)}{Colors.RESET}")
-            print(f"  {Colors.DIM}├─{Colors.RESET} 吞吐�? {Colors.GREEN}{1/avg_time:.1f} samples/s{Colors.RESET}")
+            print(f"  {Colors.DIM}├─{Colors.RESET} 吞吐�? {Colors.GREEN}{1/avg_time:.1f} samples/s{Colors.RESET}")
             print(f"  {Colors.DIM}└─{Colors.RESET} 点吞吐量: {Colors.GREEN}{total_points/total_time/1e6:.2f} M points/s{Colors.RESET}")
             
             results[config['name']] = {
@@ -904,12 +904,12 @@ def test_speed_multi_files(data_dir: str, n_iterations: int = 100):
             }
             
         except Exception as e:
-            print(f"  {Colors.RED}�?失败: {e}{Colors.RESET}")
+            print(f"  {Colors.RED}�?失败: {e}{Colors.RESET}")
             import traceback
             traceback.print_exc()
             results[config['name']] = {'error': str(e)}
     
-    # DataLoader 测试（全目录�?
+    # DataLoader 测试（全目录�?
     print(f"\n  {Colors.BOLD}📊 DataLoader 全目录测试{Colors.RESET}")
     
     try:
@@ -930,7 +930,7 @@ def test_speed_multi_files(data_dir: str, n_iterations: int = 100):
         
         print(f"  {Colors.DIM}├─{Colors.RESET} 总样本数: {n_total_samples:,}")
         
-        # 遍历整个数据集一�?
+        # 遍历整个数据集一�?
         t0 = time.perf_counter()
         total_points = 0
         batch_count = 0
@@ -945,8 +945,8 @@ def test_speed_multi_files(data_dir: str, n_iterations: int = 100):
         
         print(f"  {Colors.DIM}├─{Colors.RESET} 总批次数: {batch_count}")
         print(f"  {Colors.DIM}├─{Colors.RESET} 遍历时间: {Colors.CYAN}{format_time(total_time)}{Colors.RESET}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} 总点�? {Colors.CYAN}{total_points:,}{Colors.RESET}")
-        print(f"  {Colors.DIM}└─{Colors.RESET} 吞吐�? {Colors.GREEN}{total_points/total_time/1e6:.2f} M points/s{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 总点�? {Colors.CYAN}{total_points:,}{Colors.RESET}")
+        print(f"  {Colors.DIM}└─{Colors.RESET} 吞吐�? {Colors.GREEN}{total_points/total_time/1e6:.2f} M points/s{Colors.RESET}")
         
         results['dataloader_full'] = {
             'n_samples': n_total_samples,
@@ -957,7 +957,7 @@ def test_speed_multi_files(data_dir: str, n_iterations: int = 100):
         }
         
     except Exception as e:
-        print(f"  {Colors.RED}�?DataLoader 测试失败: {e}{Colors.RESET}")
+        print(f"  {Colors.RED}�?DataLoader 测试失败: {e}{Colors.RESET}")
         import traceback
         traceback.print_exc()
     
@@ -968,7 +968,7 @@ def run_speed_tests(pkl_path: str, n_iterations: int = 100, n_batches: int = 50,
                     test_multi_workers: bool = True, test_multi_files: bool = True):
     """运行所有速度测试"""
     print(f"\n{Colors.BOLD}{'#'*70}{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.HEADER}  �?速度测试套件{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.HEADER}  �?速度测试套件{Colors.RESET}")
     print(f"{Colors.BOLD}{'#'*70}{Colors.RESET}")
     print(f"  测试文件: {pkl_path}")
     
@@ -978,7 +978,7 @@ def run_speed_tests(pkl_path: str, n_iterations: int = 100, n_batches: int = 50,
         # 采样函数性能
         results['sampling_perf'] = test_speed_comparison(pkl_path)
         
-        # 单样本测�?
+        # 单样本测�?
         results['single_sample'] = test_speed_single_sample(pkl_path, n_iterations=n_iterations)
         
         # 随机访问测试
@@ -987,43 +987,43 @@ def run_speed_tests(pkl_path: str, n_iterations: int = 100, n_batches: int = 50,
         # DataLoader 测试
         results['dataloader'] = test_speed_dataloader(pkl_path, n_batches=n_batches)
         
-        # �?Workers 测试
+        # �?Workers 测试
         if test_multi_workers:
             results['multi_workers'] = test_speed_multi_workers(pkl_path, n_batches=n_batches)
         
-        # 多文件测�?
+        # 多文件测�?
         if test_multi_files:
             data_dir = Path(pkl_path).parent
             results['multi_files'] = test_speed_multi_files(str(data_dir), n_iterations=n_iterations)
         
     except Exception as e:
-        print(f"\n{Colors.RED}�?速度测试失败: {e}{Colors.RESET}")
+        print(f"\n{Colors.RED}�?速度测试失败: {e}{Colors.RESET}")
         import traceback
         traceback.print_exc()
     
-    # 汇�?
+    # 汇�?
     print(f"\n{Colors.BOLD}{'='*70}{Colors.RESET}")
     print(f"{Colors.BOLD}{Colors.GREEN}  📋 速度测试汇总{Colors.RESET}")
     print(f"{Colors.BOLD}{'='*70}{Colors.RESET}")
     
     if 'single_sample' in results:
-        print(f"\n  {Colors.BOLD}单样本采�?{Colors.RESET}")
+        print(f"\n  {Colors.BOLD}单样本采�?{Colors.RESET}")
         for key, val in results['single_sample'].items():
             print(f"  {Colors.DIM}├─{Colors.RESET} {key}: {format_time(val['avg_time'])} ({val['throughput']:.1f} samples/s)")
     
     if 'dataloader' in results:
-        print(f"\n  {Colors.BOLD}DataLoader 吞吐�?(num_workers=0):{Colors.RESET}")
+        print(f"\n  {Colors.BOLD}DataLoader 吞吐�?(num_workers=0):{Colors.RESET}")
         for key, val in results['dataloader'].items():
             print(f"  {Colors.DIM}├─{Colors.RESET} {key}: {val['points_per_sec']/1e6:.2f} M points/s")
     
     if 'multi_workers' in results:
-        print(f"\n  {Colors.BOLD}�?Workers 吞吐�?{Colors.RESET}")
+        print(f"\n  {Colors.BOLD}�?Workers 吞吐�?{Colors.RESET}")
         for key, val in results['multi_workers'].items():
             if 'points_per_sec' in val:
                 print(f"  {Colors.DIM}├─{Colors.RESET} {key}: {val['points_per_sec']/1e6:.2f} M points/s")
     
     if 'multi_files' in results:
-        print(f"\n  {Colors.BOLD}多文�?(全目�? 吞吐�?{Colors.RESET}")
+        print(f"\n  {Colors.BOLD}多文�?(全目�? 吞吐�?{Colors.RESET}")
         for key, val in results['multi_files'].items():
             if 'points_per_sec' in val:
                 print(f"  {Colors.DIM}├─{Colors.RESET} {key}: {val['points_per_sec']/1e6:.2f} M points/s")
@@ -1033,11 +1033,11 @@ def run_speed_tests(pkl_path: str, n_iterations: int = 100, n_batches: int = 50,
 
 
 # ============================================================================
-# 主测试入�?
+# 主测试入�?
 # ============================================================================
 
 def run_all_tests(pkl_path: str):
-    """运行所有测�?""
+    """运行所有测�?""
     print(f"\n{Colors.BOLD}{'#'*70}{Colors.RESET}")
     print(f"{Colors.BOLD}{Colors.HEADER}  🧪 BinPklDataset1 & DataModule1 测试套件{Colors.RESET}")
     print(f"{Colors.BOLD}{'#'*70}{Colors.RESET}")
@@ -1050,7 +1050,7 @@ def run_all_tests(pkl_path: str):
         results['basic_voxel'] = test_dataset_basic(pkl_path, mode='grid')
         results['basic_full'] = test_dataset_basic(pkl_path, mode='full')
         
-        # 测试2: 全覆�?
+        # 测试2: 全覆�?
         results['coverage'] = test_voxel_full_coverage(pkl_path, max_loops=None)
         results['coverage_limited'] = test_voxel_full_coverage(pkl_path, max_loops=5)
         
@@ -1070,12 +1070,12 @@ def run_all_tests(pkl_path: str):
         results['speed'] = run_speed_tests(pkl_path)
         
     except Exception as e:
-        print(f"\n{Colors.RED}�?测试失败: {e}{Colors.RESET}")
+        print(f"\n{Colors.RED}�?测试失败: {e}{Colors.RESET}")
         import traceback
         traceback.print_exc()
         return results
     
-    # 汇�?
+    # 汇�?
     print(f"\n{Colors.BOLD}{'='*70}{Colors.RESET}")
     print(f"{Colors.BOLD}{Colors.GREEN}  📋 测试结果汇总{Colors.RESET}")
     print(f"{Colors.BOLD}{'='*70}{Colors.RESET}")
@@ -1083,18 +1083,18 @@ def run_all_tests(pkl_path: str):
     all_passed = True
     for name, result in results.items():
         if name == 'speed':
-            continue  # 速度测试不参�?pass/fail 判断
+            continue  # 速度测试不参�?pass/fail 判断
         if isinstance(result, dict):
             passed = result.get('passed', True)
         else:
             passed = result
-        status = f"{Colors.GREEN}�?PASS{Colors.RESET}" if passed else f"{Colors.RED}�?FAIL{Colors.RESET}"
+        status = f"{Colors.GREEN}�?PASS{Colors.RESET}" if passed else f"{Colors.RED}�?FAIL{Colors.RESET}"
         print(f"  {Colors.DIM}├─{Colors.RESET} {name}: {status}")
         all_passed = all_passed and passed
     
-    print(f"\n  {Colors.BOLD}最终结�? ", end="")
+    print(f"\n  {Colors.BOLD}最终结果: ", end="")
     if all_passed:
-        print(f"{Colors.GREEN}所有测试通过 ✓{Colors.RESET}")
+        print(f"{Colors.GREEN}所有测试通过 [OK]{Colors.RESET}")
     else:
         print(f"{Colors.RED}部分测试失败{Colors.RESET}")
     print()
@@ -1103,20 +1103,20 @@ def run_all_tests(pkl_path: str):
 
 
 # ============================================================================
-# 命令行入�?
+# 命令行入�?
 # ============================================================================
 
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description='测试 BinPklDataset1 �?DataModule1')
+    parser = argparse.ArgumentParser(description='测试 BinPklDataset1 �?DataModule1')
     parser.add_argument('--pkl', type=str, required=False,
                         help='PKL 文件路径')
     parser.add_argument('--test', type=str, default='all',
                         choices=['all', 'basic', 'coverage', 'batch', 'datamodule', 'class', 'compare', 'speed'],
-                        help='运行的测�?)
+                        help='运行的测�?)
     parser.add_argument('--speed-iterations', type=int, default=100,
-                        help='速度测试的迭代次�?)
+                        help='速度测试的迭代次�?)
     parser.add_argument('--speed-batches', type=int, default=50,
                         help='DataLoader速度测试的批次数')
     
@@ -1130,11 +1130,11 @@ if __name__ == "__main__":
         if Path(default_path).exists():
             pkl_path = default_path
         else:
-            print(f"{Colors.RED}请指�?--pkl 参数{Colors.RESET}")
+            print(f"{Colors.RED}请指�?--pkl 参数{Colors.RESET}")
             sys.exit(1)
     
     if not Path(pkl_path).exists():
-        print(f"{Colors.RED}文件不存�? {pkl_path}{Colors.RESET}")
+        print(f"{Colors.RED}文件不存�? {pkl_path}{Colors.RESET}")
         sys.exit(1)
     
     if args.test == 'all':

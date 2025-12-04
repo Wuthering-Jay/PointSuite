@@ -9,6 +9,8 @@ import numpy as np
 import torch
 from collections.abc import Mapping, Sequence
 
+from ...utils.logger import log_warning
+
 
 def collate_fn(batch):
     """
@@ -156,7 +158,7 @@ class DynamicBatchSampler:
         
         # drop_last 不再使用，但保留参数以兼容旧代码
         if drop_last:
-            print("Warning: drop_last 参数在 DynamicBatchSampler 中已废弃，将被忽略")
+            log_warning("drop_last 参数在 DynamicBatchSampler 中已废弃，将被忽略")
         
         # 预先计算每个样本的点数
         self.num_points_list = self._get_num_points_list()
@@ -202,7 +204,7 @@ class DynamicBatchSampler:
                 num_points_list = base_num_points_list
         else:
             # 遍历整个数据集获取点数（较慢）
-            print("Warning: Dataset doesn't have data_list, scanning all samples...")
+            log_warning("Dataset doesn't have data_list, scanning all samples...")
             num_points_list = []
             for i in range(len(self.dataset)):
                 sample = self.dataset[i]

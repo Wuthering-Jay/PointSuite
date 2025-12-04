@@ -9,12 +9,12 @@ DALES 数据集训练脚本 (逻辑索引格式 - tile_las1.py)
 - 🎯 完美批次控制: 固定体素数 = 固定显存占用
 
 功能特性：
-- ✅ 自动类别权重计算和加权采样
-- ✅ 中文类别名称支持
-- ✅ 动态批次采样 (按体素数控制)
-- ✅ 多文件 LAS 预测支持
-- ✅ 梯度累积
-- ✅ 局部坐标自动转换
+- 自动类别权重计算和加权采样
+- 中文类别名称支持
+- 动态批次采样 (按体素数控制)
+- 多文件 LAS 预测支持
+- 梯度累积
+- 局部坐标自动转换
 
 配置建议：
 - 小显存(8GB):  max_points=80K,  accumulate=4  → 320K体素/更新
@@ -136,7 +136,7 @@ def main():
         '学习率': LEARNING_RATE,
         '最大Epoch': MAX_EPOCHS,
         'Workers': NUM_WORKERS,
-    }, "⚙️  训练配置")
+    }, "训练配置")
     
     # ========================================================================
     # 数据增强
@@ -482,7 +482,7 @@ def main():
             print(f"  {Colors.YELLOW}缺失的键: {missing_keys[:5]}...{Colors.RESET}")
         if unexpected_keys:
             print(f"  {Colors.YELLOW}未预期的键: {unexpected_keys[:5]}...{Colors.RESET}")
-        print(f"  {Colors.GREEN}✓ 权重加载完成{Colors.RESET}")
+        print(f"  {Colors.GREEN}[OK] 权重加载完成{Colors.RESET}")
         
         print_header("开始微调", "🏋️")
         trainer.fit(task, datamodule)
@@ -519,7 +519,7 @@ def main():
     
     print()
     print(f"{Colors.BOLD}{'═' * 70}{Colors.RESET}")
-    print(f"{Colors.BOLD}{Colors.GREEN}  🎉 训练完成!{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.GREEN}  [OK] 训练完成!{Colors.RESET}")
     print(f"{Colors.BOLD}{'═' * 70}{Colors.RESET}")
     print(f"  {Colors.DIM}├─{Colors.RESET} 检查点目录: {Colors.CYAN}{trainer.default_root_dir}{Colors.RESET}")
     print(f"  {Colors.DIM}├─{Colors.RESET} 预测结果: {Colors.CYAN}{OUTPUT_DIR}{Colors.RESET}")

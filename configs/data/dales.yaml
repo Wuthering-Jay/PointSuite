@@ -1,113 +1,202 @@
-# DALES 数据集配置
+# ════════════════════════════════════════════════════════════════════════════
+# DALES 数据集配置 (DALES Dataset Configuration)
+# ════════════════════════════════════════════════════════════════════════════
 # 
 # DALES (Dayton Annotated LiDAR Earth Scan) 数据集
-# 8 类语义分割任务
+# 大规模航空 LiDAR 点云语义分割数据集，包含 8 个类别
+#
+# 此文件定义数据集相关的所有配置，可在 experiment yaml 中覆盖任意参数
+#
+# 配置结构:
+#   - paths: 数据路径配置
+#   - classes: 类别信息配置
+#   - loader: 数据加载配置
+#   - transforms: 数据增强配置
+# ════════════════════════════════════════════════════════════════════════════
 
-# ========================================================================
-# 数据路径
-# ========================================================================
-train_data: E:/data/DALES/dales_las/bin_logical/train
-val_data: E:/data/DALES/dales_las/bin_logical/val
-test_data: E:/data/DALES/dales_las/bin_logical/test
-predict_data: E:/data/DALES/dales_las/bin_logical/test
+# ════════════════════════════════════════════════════════════════════════════
+# 数据路径配置 (Data Paths)
+# ════════════════════════════════════════════════════════════════════════════
+# 必须在 experiment yaml 中配置或覆盖
+paths:
+  train: null      # 训练数据目录 (包含 .bin 和 .pkl 文件)
+  val: null        # 验证数据目录
+  test: null       # 测试数据目录
+  predict: null    # 预测数据目录
 
-# ========================================================================
-# 类别配置
-# ========================================================================
-# 类别映射: 原始标签 -> 训练标签
-# 列表形式: [1, 2, 3, 4, 5, 6, 7, 8] 自动映射为 [0, 1, 2, ..., 7]
-# 字典形式: {1: 0, 2: 1, ...} 显式指定映射
-class_mapping: [1, 2, 3, 4, 5, 6, 7, 8]
-class_names: ['地面', '植被', '车辆', '卡车', '电线', '篱笆', '杆状物', '建筑']
-num_classes: 8
-ignore_label: -1
+# ════════════════════════════════════════════════════════════════════════════
+# 类别配置 (Class Configuration)
+# ════════════════════════════════════════════════════════════════════════════
+classes:
+  # 类别映射: 原始标签 -> 训练标签
+  # 格式说明:
+  #   - 列表形式: [1, 2, 3, ...] 自动映射为 [0, 1, 2, ...]
+  #   - 字典形式: {1: 0, 2: 1, ...} 显式指定映射关系
+  # 此处 DALES 原始标签 1-8 映射为训练标签 0-7
+  mapping: [1, 2, 3, 4, 5, 6, 7, 8]
+  
+  # 类别名称: 对应映射后的训练标签顺序
+  names: ['地面', '植被', '车辆', '卡车', '电线', '篱笆', '杆状物', '建筑']
+  
+  # 类别数量: 参与训练的有效类别数
+  num_classes: 8
+  
+  # 忽略标签: 该标签的点不参与损失计算和指标统计
+  # 常用于标记: 无标签点、边界点、无效点
+  ignore_label: -1
 
-# ========================================================================
-# 数据加载配置
-# ========================================================================
-# 加载的属性
-assets: ['coord', 'class', 'echo']
+# ════════════════════════════════════════════════════════════════════════════
+# 数据加载配置 (Data Loader Configuration)
+# ════════════════════════════════════════════════════════════════════════════
+loader:
+  # ─────────────────────────────────────────────────────────────
+  # 属性字段配置
+  # ─────────────────────────────────────────────────────────────
+  # 从 .bin/.pkl 文件加载的属性字段
+  # 可选: coord, class, intensity, echo, rgb, normal 等
+  assets: ['coord', 'class', 'echo']
+  
+  # ─────────────────────────────────────────────────────────────
+  # 采样模式配置
+  # ─────────────────────────────────────────────────────────────
+  # 采样模式:
+  #   - grid: 网格采样，每次返回一个 grid 区域的点
+  #   - full: 全点云模式，返回整个文件的所有点
+  mode: grid
+  
+  # 最大采样轮数: test/predict 时限制每个文件的采样次数
+  # null 表示完整遍历所有网格
+  max_loops: null
+  
+  # ─────────────────────────────────────────────────────────────
+  # DataLoader 参数
+  # ─────────────────────────────────────────────────────────────
+  # 批次大小: 每次迭代加载的样本数
+  batch_size: 4
+  
+  # 数据加载线程数: 并行加载数据的工作进程数
+  # 建议设置为 CPU 核心数的一半到全部
+  num_workers: 4
+  
+  # 是否使用锁页内存: 加速 CPU->GPU 数据传输
+  pin_memory: true
+  
+  # 是否保持工作进程: 避免每个 epoch 重启进程
+  persistent_workers: true
+  
+  # 预取因子: 每个工作进程预加载的批次数
+  prefetch_factor: 2
+  
+  # ─────────────────────────────────────────────────────────────
+  # 动态批次配置
+  # ─────────────────────────────────────────────────────────────
+  # 按点数而非样本数控制 batch 大小
+  # 解决点云大小不一导致显存占用波动的问题
+  dynamic_batch:
+    enabled: true
+    # 训练时每 batch 最大点数
+    max_points_train: 125000
+    # 推理时每 batch 最大点数
+    max_points_inference: 125000
+  
+  # ─────────────────────────────────────────────────────────────
+  # 采样策略配置
+  # ─────────────────────────────────────────────────────────────
+  # 加权采样器: 按类别频率的倒数采样，缓解类别不平衡
+  weighted_sampler: true
+  
+  # 循环次数: 每个 epoch 重复遍历数据集的次数
+  # 相当于数据增强倍数，增加训练样本多样性
+  loop:
+    train: 5     # 训练时循环 5 次
+    val: 5       # 验证时循环 5 次
+    test: 1      # 测试时不循环
+    predict: 1   # 预测时不循环
 
-# 采样模式配置
-mode: grid            # 'grid' 或 'full'
-max_loops: null       # test/predict 时最大采样轮数
+# ════════════════════════════════════════════════════════════════════════════
+# 数据增强配置 (Transforms Configuration)
+# ════════════════════════════════════════════════════════════════════════════
+# 不同阶段使用不同的数据变换流程
+transforms:
+  # ─────────────────────────────────────────────────────────────
+  # 训练阶段增强 (包含随机变换)
+  # ─────────────────────────────────────────────────────────────
+  train:
+    # 中心偏移: 将点云中心移动到原点
+    - class_path: pointsuite.data.transforms.CenterShift
+    
+    # 随机丢弃: 随机移除部分点，模拟遮挡
+    - class_path: pointsuite.data.transforms.RandomDropout
+      init_args:
+        dropout_ratio: 0.2    # 最大丢弃比例 20%
+        p: 0.5                # 执行概率 50%
+    
+    # 随机旋转: 绕指定轴旋转
+    - class_path: pointsuite.data.transforms.RandomRotate
+      init_args:
+        angle: [-1, 1]        # 旋转角度范围 (弧度)
+        axis: z               # 旋转轴
+        p: 0.5                # 执行概率
+    
+    # 随机缩放: 等比例缩放点云
+    - class_path: pointsuite.data.transforms.RandomScale
+      init_args:
+        scale: [0.9, 1.1]     # 缩放范围 90%-110%
+    
+    # 随机翻转: 沿坐标轴镜像翻转
+    - class_path: pointsuite.data.transforms.RandomFlip
+      init_args:
+        p: 0.5                # 执行概率
+    
+    # 随机抖动: 给坐标添加高斯噪声
+    - class_path: pointsuite.data.transforms.RandomJitter
+      init_args:
+        sigma: 0.005          # 噪声标准差
+        clip: 0.02            # 噪声裁剪范围
+    
+    # 收集器: 整理输出字段
+    - class_path: pointsuite.data.transforms.Collect
+      init_args:
+        keys: ['coord', 'class']        # 输出的主要字段
+        feat_keys:                       # 特征字段组合
+          feat: ['coord', 'echo']        # feat = coord(3) + echo(2) = 5 维
+    
+    # 转换为张量: numpy -> torch.Tensor
+    - class_path: pointsuite.data.transforms.ToTensor
 
-# DataLoader 配置
-batch_size: 4
-num_workers: 4
-pin_memory: true
-persistent_workers: true
-prefetch_factor: 2
+  # ─────────────────────────────────────────────────────────────
+  # 验证阶段增强 (无随机变换)
+  # ─────────────────────────────────────────────────────────────
+  val:
+    - class_path: pointsuite.data.transforms.CenterShift
+    - class_path: pointsuite.data.transforms.Collect
+      init_args:
+        keys: ['coord', 'class']
+        feat_keys:
+          feat: ['coord', 'echo']
+    - class_path: pointsuite.data.transforms.ToTensor
 
-# 动态批次配置
-use_dynamic_batch: true
-max_points: 125000              # 训练时批次点数
-use_dynamic_batch_inference: true
-max_points_inference: 125000    # 推理时批次点数
+  # ─────────────────────────────────────────────────────────────
+  # 测试阶段增强 (与验证相同)
+  # ─────────────────────────────────────────────────────────────
+  test:
+    - class_path: pointsuite.data.transforms.CenterShift
+    - class_path: pointsuite.data.transforms.Collect
+      init_args:
+        keys: ['coord', 'class']
+        feat_keys:
+          feat: ['coord', 'echo']
+    - class_path: pointsuite.data.transforms.ToTensor
 
-# 加权采样
-use_weighted_sampler: true
-
-# 循环配置 (数据增强)
-train_loop: 5
-val_loop: 5
-test_loop: 1
-predict_loop: 1
-
-# ========================================================================
-# 数据增强配置
-# ========================================================================
-train_transforms:
-  - class_path: pointsuite.data.transforms.CenterShift
-  - class_path: pointsuite.data.transforms.RandomDropout
-    init_args:
-      dropout_ratio: 0.2
-      p: 0.5
-  - class_path: pointsuite.data.transforms.RandomRotate
-    init_args:
-      angle: [-1, 1]
-      axis: z
-      p: 0.5
-  - class_path: pointsuite.data.transforms.RandomScale
-    init_args:
-      scale: [0.9, 1.1]
-  - class_path: pointsuite.data.transforms.RandomFlip
-    init_args:
-      p: 0.5
-  - class_path: pointsuite.data.transforms.RandomJitter
-    init_args:
-      sigma: 0.005
-      clip: 0.02
-  - class_path: pointsuite.data.transforms.Collect
-    init_args:
-      keys: ['coord', 'class']
-      feat_keys:
-        feat: ['coord', 'echo']
-  - class_path: pointsuite.data.transforms.ToTensor
-
-val_transforms:
-  - class_path: pointsuite.data.transforms.CenterShift
-  - class_path: pointsuite.data.transforms.Collect
-    init_args:
-      keys: ['coord', 'class']
-      feat_keys:
-        feat: ['coord', 'echo']
-  - class_path: pointsuite.data.transforms.ToTensor
-
-test_transforms:
-  - class_path: pointsuite.data.transforms.CenterShift
-  - class_path: pointsuite.data.transforms.Collect
-    init_args:
-      keys: ['coord', 'class']
-      feat_keys:
-        feat: ['coord', 'echo']
-  - class_path: pointsuite.data.transforms.ToTensor
-
-predict_transforms:
-  - class_path: pointsuite.data.transforms.CenterShift
-  - class_path: pointsuite.data.transforms.Collect
-    init_args:
-      keys: ['coord', 'indices', 'bin_file', 'bin_path', 'pkl_path']
-      feat_keys:
-        feat: ['coord', 'echo']
-  - class_path: pointsuite.data.transforms.ToTensor
+  # ─────────────────────────────────────────────────────────────
+  # 预测阶段增强 (保留索引信息用于结果写回)
+  # ─────────────────────────────────────────────────────────────
+  predict:
+    - class_path: pointsuite.data.transforms.CenterShift
+    - class_path: pointsuite.data.transforms.Collect
+      init_args:
+        # 预测时需要保留文件路径和索引，用于结果写回
+        keys: ['coord', 'indices', 'bin_file', 'bin_path', 'pkl_path']
+        feat_keys:
+          feat: ['coord', 'echo']
+    - class_path: pointsuite.data.transforms.ToTensor

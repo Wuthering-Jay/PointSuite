@@ -217,30 +217,33 @@ class BinPklDataset(DatasetBase):
         # 处理不同的 data_root 类型
         pkl_files = []
         
+        # 导入日志工具
+        from ...utils.logger import log_info, log_warning, Colors
+        
         if isinstance(self.data_root, (list, tuple)):
             pkl_files = [Path(p) for p in self.data_root]
-            print(f"从 {len(pkl_files)} 个指定的 pkl 文件加载")
+            log_info(f"从 {len(pkl_files)} 个指定的 pkl 文件加载")
         elif self.data_root.is_file() and self.data_root.suffix == '.pkl':
             pkl_files = [self.data_root]
-            print(f"从单个 pkl 文件加载: {self.data_root.name}")
+            log_info(f"从单个 pkl 文件加载: {self.data_root.name}")
         else:
             pkl_files = sorted(self.data_root.glob('*.pkl'))
             if len(pkl_files) == 0:
                 raise ValueError(f"在 {self.data_root} 中未找到 pkl 文件")
-            print(f"在目录中找到 {len(pkl_files)} 个 pkl 文件")
+            log_info(f"在目录中找到 {Colors.YELLOW}{len(pkl_files)}{Colors.RESET} 个 pkl 文件")
         
         total_segments = 0
         total_samples = 0
         
         for pkl_path in pkl_files:
             if not pkl_path.exists():
-                print(f"警告: {pkl_path} 未找到，跳过")
+                log_warning(f"{pkl_path} 未找到，跳过")
                 continue
                 
             bin_path = pkl_path.with_suffix('.bin')
             
             if not bin_path.exists():
-                print(f"警告: {bin_path.name} 未找到，跳过 {pkl_path.name}")
+                log_warning(f"{bin_path.name} 未找到，跳过 {pkl_path.name}")
                 continue
             
             # 加载 pkl 元数据（只在初始化时使用，不缓存到实例）
@@ -339,8 +342,9 @@ class BinPklDataset(DatasetBase):
                 else:
                     raise ValueError(f"未知模式: {self.mode}")
         
-        print(f"从 {len(pkl_files)} 个文件加载了 {total_segments} 个 segments, "
-              f"共 {total_samples} 个样本 (mode={self.mode}, split={self.split})")
+        log_info(f"加载了 {Colors.GREEN}{total_segments}{Colors.RESET} 个 segments, "
+                 f"共 {Colors.YELLOW}{total_samples}{Colors.RESET} 个样本 "
+                 f"(mode={self.mode}, split={self.split})")
         
         return data_list
     

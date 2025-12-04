@@ -103,7 +103,7 @@ class DataModuleBase(pl.LightningDataModule, ABC):
                                  如果为 True 且提供了 train_sampler_weights，将启用加权采样
             train_sampler_weights: WeightedRandomSampler 的权重列表（仅用于训练）
                                   长度必须等于 train_dataset 的实际长度（考虑 loop）
-                                  ⚠️ 不会保存到超参数中（数组太长）
+                                  注意: 不会保存到超参数中（数组太长）
             pin_memory: 是否在 DataLoader 中使用固定内存（更快的 GPU 传输）
             persistent_workers: 在 epoch 之间保持工作进程活动（更快但使用更多内存）
             prefetch_factor: 每个工作进程预取的批次数
@@ -207,8 +207,7 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         参数：
             stage: 当前阶段（'fit'、'validate'、'test'、'predict'，或 None 表示所有阶段）
         """
-        # 🔍 调试：打印 setup 被调用的 stage
-        print(f"[DEBUG] DataModuleBase.setup(stage='{stage}')")
+        from ..utils.logger import log_debug
         
         # 设置训练数据集
         if (stage == 'fit' or stage is None) and self.train_data is not None:
@@ -244,13 +243,11 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         
         # 设置预测数据集（独立于测试）
         if (stage == 'predict' or stage is None) and self.predict_data is not None:
-            print(f"[DEBUG] Creating predict_dataset from predict_data={self.predict_data}")
             self.predict_dataset = self._create_dataset(
                 data_paths=self.predict_data,
                 split='predict',
                 transforms=self.predict_transforms
             )
-            print(f"[DEBUG] predict_dataset created with {len(self.predict_dataset)} samples")
     
     def _compute_sample_weights(self, dataset):
         """
@@ -264,11 +261,12 @@ class DataModuleBase(pl.LightningDataModule, ABC):
         """
         import torch
         import numpy as np
+        from ..utils.logger import log_info, log_warning, Colors
         
         # 转换 class_weights 为字典
         if self.class_weights is None:
             # 从数据集自动计算类别权重
-            print("自动从数据集计算类别权重...")
+            log_info("自动计算类别权重...")
             class_weights_dict = dataset.compute_class_weights(
                 method='sqrt_inverse',  # sqrt_inverse 比 log_inverse 差异更大
                 smooth=1.0,
@@ -276,23 +274,22 @@ class DataModuleBase(pl.LightningDataModule, ABC):
             )
             
             if class_weights_dict is None:
-                print("警告: 数据集不支持自动类别权重计算，使用均匀权重")
+                log_warning("数据集不支持自动类别权重计算，使用均匀权重")
                 return None
             
-            print(f"计算的类别权重: {class_weights_dict}")
         elif isinstance(self.class_weights, torch.Tensor):
             class_weights_dict = {i: float(w) for i, w in enumerate(self.class_weights)}
         elif isinstance(self.class_weights, dict):
             class_weights_dict = self.class_weights
         else:
-            print(f"警告: class_weights 类型不支持: {type(self.class_weights)}")
+            log_warning(f"class_weights 类型不支持: {type(self.class_weights)}")
             return None
         
         # 获取基础样本权重（不考虑 loop）
         base_weights = dataset.get_sample_weights(class_weights_dict)
         
         if base_weights is None:
-            print("警告: 数据集不支持样本权重计算")
+            log_warning("数据集不支持样本权重计算")
             return None
         
         # 如果 train_loop > 1，重复权重
@@ -300,13 +297,6 @@ class DataModuleBase(pl.LightningDataModule, ABC):
             weights = np.tile(base_weights, self.train_loop)
         else:
             weights = base_weights
-        
-        print(f"计算样本权重:")
-        print(f"  - 基础样本数: {len(base_weights)}")
-        print(f"  - Train loop: {self.train_loop}")
-        print(f"  - 最终样本数: {len(weights)}")
-        print(f"  - 权重范围: [{weights.min():.4f}, {weights.max():.4f}]")
-        print(f"  - 权重均值: {weights.mean():.4f}")
         
         return weights.tolist()
     

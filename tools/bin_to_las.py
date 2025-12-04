@@ -119,7 +119,7 @@ def create_las_from_segment(segment_data: np.ndarray,
                 header.vlrs.append(vlr)
             except Exception as e:
                 if verbose:
-                    print(f"  ⚠️ 无法恢复 VLR {vlr_dict.get('user_id', '?')}: {e}")
+                    print(f"  [WARN] 无法恢复 VLR {vlr_dict.get('user_id', '?')}: {e}")
     
     # 创建 LAS 数据对象
     las = laspy.LasData(header)
@@ -155,7 +155,7 @@ def create_las_from_segment(segment_data: np.ndarray,
                 setattr(las, las_attr, segment_data[field])
             except Exception as e:
                 if verbose:
-                    print(f"  ⚠️ 无法设置字段 {field}: {e}")
+                    print(f"  [WARN] 无法设置字段 {field}: {e}")
     
     # 额外字段（通过 extra_bytes 写入）
     extra_fields = ['is_ground']  # tile_las1.py 可能生成的额外字段
@@ -172,7 +172,7 @@ def create_las_from_segment(segment_data: np.ndarray,
                 setattr(las, field_name, field_data)
             except Exception as e:
                 if verbose:
-                    print(f"  ⚠️ 无法添加额外字段 {field_name}: {e}")
+                    print(f"  [WARN] 无法添加额外字段 {field_name}: {e}")
     
     # 保存 LAS 文件
     las.write(output_path)
@@ -305,7 +305,7 @@ class BinToLasConverter:
     def convert_all(self):
         """转换所有文件"""
         if not self.file_pairs:
-            print(f"{Colors.RED}❌ 未找到有效的 bin+pkl 文件对{Colors.RESET}")
+            print(f"{Colors.RED}[ERROR] 未找到有效的 bin+pkl 文件对{Colors.RESET}")
             return
         
         start_time = time.time()
@@ -339,7 +339,7 @@ class BinToLasConverter:
         
         # 美化的完成输出
         print(f"\n{Colors.BOLD}{'═'*70}{Colors.RESET}")
-        print(f"{Colors.BOLD}{Colors.GREEN}  ✅ 转换完成!{Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.GREEN}  [OK] 转换完成!{Colors.RESET}")
         print(f"  {Colors.DIM}├─{Colors.RESET} ⏱️  总耗时: {Colors.CYAN}{format_time(elapsed)}{Colors.RESET}")
         print(f"  {Colors.DIM}└─{Colors.RESET} 📄 平均每文件: {Colors.CYAN}{format_time(elapsed/len(self.file_pairs))}{Colors.RESET}")
         print(f"{Colors.BOLD}{'═'*70}{Colors.RESET}\n")
@@ -448,7 +448,7 @@ class BinToLasConverter:
                 success_count += 1
                 
             except Exception as e:
-                print(f"\n  ⚠️ Segment {seg_id} 转换失败: {e}")
+                print(f"\n  [WARN] Segment {seg_id} 转换失败: {e}")
         
         print(f"  {Colors.DIM}│{Colors.RESET}   → 成功: {Colors.GREEN}{success_count}/{len(seg_ids)}{Colors.RESET} segments")
     
@@ -471,7 +471,7 @@ class BinToLasConverter:
         - 对于点数少于采样轮数的网格：使用模运算重复采样
         """
         if grid_size is None:
-            print(f"  {Colors.YELLOW}⚠️  警告: 未找到 grid_size 信息，回退到全量模式{Colors.RESET}")
+            print(f"  {Colors.YELLOW}[WARN] 未找到 grid_size 信息，回退到全量模式{Colors.RESET}")
             self._convert_full_mode(mmap_data, segments_info, seg_ids, header_info, output_dir, base_name)
             return
         
@@ -528,7 +528,7 @@ class BinToLasConverter:
                 success_count += 1
                 
             except Exception as e:
-                print(f"\n  ⚠️ Segment {seg_id} 转换失败: {e}")
+                print(f"\n  [WARN] Segment {seg_id} 转换失败: {e}")
         
         print(f"  {Colors.DIM}│{Colors.RESET}   → 成功: {Colors.GREEN}{success_count}/{len(seg_ids)}{Colors.RESET} segments")
         print(f"  {Colors.DIM}│{Colors.RESET}   → 生成: {Colors.CYAN}{total_las_files}{Colors.RESET} LAS 文件")

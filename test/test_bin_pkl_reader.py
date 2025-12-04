@@ -141,7 +141,7 @@ def validate_segments(result: dict, verbose: bool = True) -> bool:
         if metadata.get('overlap', False):
             print(f"{Colors.YELLOW}跳过 (overlap模式){Colors.RESET}")
         else:
-            print(f"{Colors.GREEN}✓{Colors.RESET}" if total_points_in_segments == len(data) else f"{Colors.RED}✗{Colors.RESET}")
+            print(f"{Colors.GREEN}[OK]{Colors.RESET}" if total_points_in_segments == len(data) else f"{Colors.RED}[FAIL]{Colors.RESET}")
     
     # 2. 验证索引范围
     invalid_indices = 0
@@ -154,7 +154,7 @@ def validate_segments(result: dict, verbose: bool = True) -> bool:
     
     if verbose:
         print(f"  {Colors.DIM}├─{Colors.RESET} 索引范围验证: ", end="")
-        print(f"{Colors.GREEN}✓{Colors.RESET}" if invalid_indices == 0 else f"{Colors.RED}✗ ({invalid_indices} 个无效){Colors.RESET}")
+        print(f"{Colors.GREEN}[OK]{Colors.RESET}" if invalid_indices == 0 else f"{Colors.RED}[FAIL] ({invalid_indices} 个无效){Colors.RESET}")
     
     # 3. 验证 sort_idx 和 voxel_counts
     voxel_mismatch = 0
@@ -170,7 +170,7 @@ def validate_segments(result: dict, verbose: bool = True) -> bool:
     
     if verbose:
         print(f"  {Colors.DIM}├─{Colors.RESET} 体素索引验证: ", end="")
-        print(f"{Colors.GREEN}✓{Colors.RESET}" if voxel_mismatch == 0 else f"{Colors.RED}✗ ({voxel_mismatch} 个不匹配){Colors.RESET}")
+        print(f"{Colors.GREEN}[OK]{Colors.RESET}" if voxel_mismatch == 0 else f"{Colors.RED}[FAIL] ({voxel_mismatch} 个不匹配){Colors.RESET}")
     
     # 4. 验证边界框
     bounds_valid = 0
@@ -192,7 +192,7 @@ def validate_segments(result: dict, verbose: bool = True) -> bool:
     
     if verbose:
         print(f"  {Colors.DIM}└─{Colors.RESET} 边界框验证: ", end="")
-        print(f"{Colors.GREEN}✓ ({bounds_valid}/{len(segments)} 通过){Colors.RESET}" if bounds_valid == len(segments) else f"{Colors.YELLOW}部分通过 ({bounds_valid}/{len(segments)}){Colors.RESET}")
+        print(f"{Colors.GREEN}[OK] ({bounds_valid}/{len(segments)} 通过){Colors.RESET}" if bounds_valid == len(segments) else f"{Colors.YELLOW}部分通过 ({bounds_valid}/{len(segments)}){Colors.RESET}")
     
     return all_passed
 
@@ -302,7 +302,7 @@ def test_data_access(result: dict, segment_id: int = 0):
     t1 = time.time()
     print(f"  {Colors.DIM}└─{Colors.RESET} 体素索引展开: {Colors.GREEN}{(t1-t0)*1000:.2f}ms{Colors.RESET} → {len(voxel_indices)} 点")
     
-    print(f"\n  {Colors.GREEN}✓ 数据访问测试通过{Colors.RESET}")
+    print(f"\n  {Colors.GREEN}[OK] 数据访问测试通过{Colors.RESET}")
 
 
 def run_full_test(data_dir: str):
@@ -329,21 +329,21 @@ def run_full_test(data_dir: str):
             result = read_bin_pkl(pkl_file, verbose=False)
             passed = validate_segments(result, verbose=False)
             
-            status = f"{Colors.GREEN}✓{Colors.RESET}" if passed else f"{Colors.RED}✗{Colors.RESET}"
+            status = f"{Colors.GREEN}[OK]{Colors.RESET}" if passed else f"{Colors.RED}[FAIL]{Colors.RESET}"
             print(f"  {status} {pkl_file.name}: {format_number(result['metadata']['num_points'])} 点, {result['metadata']['num_segments']} 块")
             
             if not passed:
                 all_passed = False
         except Exception as e:
-            print(f"  {Colors.RED}✗ {pkl_file.name}: {e}{Colors.RESET}")
+            print(f"  {Colors.RED}[FAIL] {pkl_file.name}: {e}{Colors.RESET}")
             all_passed = False
     
-    print(f"\n{Colors.BOLD}{'═'*70}{Colors.RESET}")
+    print(f"\n{Colors.BOLD}{'='*70}{Colors.RESET}")
     if all_passed:
-        print(f"{Colors.BOLD}{Colors.GREEN}  ✅ 所有测试通过!{Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.GREEN}  [OK] 所有测试通过!{Colors.RESET}")
     else:
-        print(f"{Colors.BOLD}{Colors.RED}  ❌ 部分测试失败{Colors.RESET}")
-    print(f"{Colors.BOLD}{'═'*70}{Colors.RESET}\n")
+        print(f"{Colors.BOLD}{Colors.RED}  [FAIL] 部分测试失败{Colors.RESET}")
+    print(f"{Colors.BOLD}{'='*70}{Colors.RESET}\n")
 
 
 # ============================================================================

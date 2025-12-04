@@ -109,8 +109,8 @@ def test_pkl_index_coverage(pkl_path: str) -> Dict:
     coverage = num_unique / num_points * 100 if num_points > 0 else 0
     
     if len(missing_indices) == 0:
-        print(f"  {Colors.DIM}├─{Colors.RESET} 覆盖率: {Colors.GREEN}100% ✓{Colors.RESET}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} 遗漏点数: {Colors.GREEN}0 ✓{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 覆盖率: {Colors.GREEN}100% [OK]{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 遗漏点数: {Colors.GREEN}0 [OK]{Colors.RESET}")
     else:
         print(f"  {Colors.DIM}├─{Colors.RESET} 覆盖率: {Colors.RED}{format_percent(coverage)}{Colors.RESET}")
         print(f"  {Colors.DIM}├─{Colors.RESET} 遗漏点数: {Colors.RED}{format_number(len(missing_indices))}{Colors.RESET}")
@@ -120,14 +120,14 @@ def test_pkl_index_coverage(pkl_path: str) -> Dict:
     if len(extra_indices) > 0:
         print(f"  {Colors.DIM}├─{Colors.RESET} 超出范围索引: {Colors.RED}{format_number(len(extra_indices))}{Colors.RESET}")
     else:
-        print(f"  {Colors.DIM}├─{Colors.RESET} 超出范围索引: {Colors.GREEN}0 ✓{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 超出范围索引: {Colors.GREEN}0 [OK]{Colors.RESET}")
     
-    print(f"\n  {Colors.BOLD}📈 重复统计 (跨 segment):{Colors.RESET}")
+    print(f"\n  {Colors.BOLD}重复统计 (跨 segment):{Colors.RESET}")
     print(f"  {Colors.DIM}├─{Colors.RESET} 重复索引总数: {Colors.YELLOW}{format_number(duplicate_count)}{Colors.RESET}")
     print(f"  {Colors.DIM}├─{Colors.RESET} 最大重复次数: {Colors.YELLOW}{max_repeat}{Colors.RESET}")
     
     # Segment 大小统计
-    print(f"\n  {Colors.BOLD}📦 Segment 大小统计:{Colors.RESET}")
+    print(f"\n  {Colors.BOLD}Segment 大小统计:{Colors.RESET}")
     print(f"  {Colors.DIM}├─{Colors.RESET} 最小: {Colors.CYAN}{format_number(min(segment_sizes))}{Colors.RESET}")
     print(f"  {Colors.DIM}├─{Colors.RESET} 最大: {Colors.CYAN}{format_number(max(segment_sizes))}{Colors.RESET}")
     print(f"  {Colors.DIM}└─{Colors.RESET} 平均: {Colors.CYAN}{format_number(int(np.mean(segment_sizes)))}{Colors.RESET}")
@@ -310,13 +310,13 @@ def test_voxel_sample_coverage(pkl_path: str,
     
     overall_coverage = total_unique / total_points * 100 if total_points > 0 else 0
     if overall_coverage >= 99.99:
-        print(f"  {Colors.DIM}├─{Colors.RESET} 总覆盖率: {Colors.GREEN}{format_percent(overall_coverage)} ✓{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 总覆盖率: {Colors.GREEN}{format_percent(overall_coverage)} [OK]{Colors.RESET}")
     else:
         print(f"  {Colors.DIM}├─{Colors.RESET} 总覆盖率: {Colors.YELLOW}{format_percent(overall_coverage)}{Colors.RESET}")
     
     # 重复采样统计
     repeat_total = total_sampled - total_unique
-    print(f"\n  {Colors.BOLD}🔁 重复采样统计:{Colors.RESET}")
+    print(f"\n  {Colors.BOLD}重复采样统计:{Colors.RESET}")
     print(f"  {Colors.DIM}├─{Colors.RESET} 重复采样总次数: {Colors.YELLOW}{format_number(repeat_total)}{Colors.RESET}")
     
     if all_repeat_counts:
@@ -326,7 +326,7 @@ def test_voxel_sample_coverage(pkl_path: str,
         print(f"  {Colors.DIM}├─{Colors.RESET} 最小采样次数: {Colors.YELLOW}{min(all_repeat_counts)}{Colors.RESET}")
         
         # 采样次数分布
-        print(f"\n  {Colors.BOLD}📈 采样次数分布:{Colors.RESET}")
+        print(f"\n  {Colors.BOLD}采样次数分布:{Colors.RESET}")
         sorted_counts = sorted(repeat_counter.items())
         for count, num_points in sorted_counts[:10]:  # 只显示前10个
             pct = num_points / len(all_repeat_counts) * 100
@@ -338,10 +338,10 @@ def test_voxel_sample_coverage(pkl_path: str,
             print(f"  {Colors.DIM}│{Colors.RESET}   ... 还有 {len(sorted_counts) - 10} 种采样次数")
     
     # 显示部分 segment 详情
-    print(f"\n  {Colors.BOLD}📦 Segment 详情 (前5个):{Colors.RESET}")
+    print(f"\n  {Colors.BOLD}Segment 详情 (前5个):{Colors.RESET}")
     for res in segment_results[:5]:
         if res['has_voxel']:
-            status = f"{Colors.GREEN}✓{Colors.RESET}" if res['coverage'] >= 99.99 else f"{Colors.YELLOW}!{Colors.RESET}"
+            status = f"{Colors.GREEN}[OK]{Colors.RESET}" if res['coverage'] >= 99.99 else f"{Colors.YELLOW}!{Colors.RESET}"
             print(f"  {Colors.DIM}├─{Colors.RESET} Seg {res['seg_id']:4d}: "
                   f"{format_number(res['num_points']):>10} 点, "
                   f"{res['num_voxels']:>6} 体素, "
@@ -400,7 +400,7 @@ def test_all_points_sampled(pkl_path: str,
     segments = metadata['segments']
     
     if segment_id >= len(segments):
-        print(f"  {Colors.RED}❌ Segment {segment_id} 不存在 (共 {len(segments)} 个){Colors.RESET}")
+        print(f"  {Colors.RED}[ERROR] Segment {segment_id} 不存在 (共 {len(segments)} 个){Colors.RESET}")
         return {'passed': False, 'error': 'segment not found'}
     
     seg_info = segments[segment_id]
@@ -448,10 +448,10 @@ def test_all_points_sampled(pkl_path: str,
     missing = expected_points - unique_sampled
     extra = unique_sampled - expected_points
     
-    print(f"\n  {Colors.BOLD}🔍 覆盖分析:{Colors.RESET}")
+    print(f"\n  {Colors.BOLD}覆盖分析:{Colors.RESET}")
     
     if len(missing) == 0:
-        print(f"  {Colors.DIM}├─{Colors.RESET} 覆盖状态: {Colors.GREEN}所有点都被采样 ✓{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 覆盖状态: {Colors.GREEN}所有点都被采样 [OK]{Colors.RESET}")
     else:
         print(f"  {Colors.DIM}├─{Colors.RESET} 覆盖状态: {Colors.RED}有 {len(missing)} 个点未被采样{Colors.RESET}")
         if len(missing) <= 20:
@@ -541,13 +541,13 @@ def run_all_tests(pkl_path: str, max_loops: Optional[int] = None):
     all_passed = True
     for name, result in results.items():
         passed = result.get('passed', False)
-        status = f"{Colors.GREEN}✓ PASS{Colors.RESET}" if passed else f"{Colors.RED}✗ FAIL{Colors.RESET}"
+        status = f"{Colors.GREEN}[PASS]{Colors.RESET}" if passed else f"{Colors.RED}[FAIL]{Colors.RESET}"
         print(f"  {Colors.DIM}├─{Colors.RESET} {name}: {status}")
         all_passed = all_passed and passed
     
     print(f"\n  {Colors.BOLD}最终结果: ", end="")
     if all_passed:
-        print(f"{Colors.GREEN}所有测试通过 ✓{Colors.RESET}")
+        print(f"{Colors.GREEN}所有测试通过 [OK]{Colors.RESET}")
     else:
         print(f"{Colors.RED}部分测试失败{Colors.RESET}")
     print()

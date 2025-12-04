@@ -18,7 +18,7 @@ from .base import BaseEngine
 from ..data import BinPklDataModule
 from ..tasks import SemanticSegmentationTask
 from ..utils.callbacks import SemanticPredictLasWriter, AutoEmptyCacheCallback, TextLoggingCallback
-from ..utils.logger import Colors, print_config
+from ..utils.logger import Colors, print_config, log_info
 
 
 class SemanticSegmentationEngine(BaseEngine):
@@ -61,58 +61,139 @@ class SemanticSegmentationEngine(BaseEngine):
         """
         创建 BinPklDataModule
         
+        适配新的配置结构:
+        - data.paths: 数据路径
+        - data.classes: 类别配置
+        - data.loader: 数据加载配置
+        - data.transforms: 数据增强配置
+        
         Returns:
             BinPklDataModule 实例
         """
         data_config = self.config.data.copy()
         
+        # ========================================
+        # 解析新配置结构
+        # ========================================
+        
+        # 数据路径 (新结构: data.paths.xxx)
+        paths = data_config.get('paths', {})
+        train_data = paths.get('train') or data_config.get('train_data')
+        val_data = paths.get('val') or data_config.get('val_data')
+        test_data = paths.get('test') or data_config.get('test_data')
+        predict_data = paths.get('predict') or data_config.get('predict_data')
+        
+        # 类别配置 (新结构: data.classes.xxx)
+        classes = data_config.get('classes', {})
+        class_mapping = classes.get('mapping') or data_config.get('class_mapping')
+        class_names = classes.get('names') or data_config.get('class_names')
+        num_classes = classes.get('num_classes') or data_config.get('num_classes')
+        ignore_label = classes.get('ignore_label') if 'ignore_label' in classes else data_config.get('ignore_label', -1)
+        
+        # 数据加载配置 (新结构: data.loader.xxx)
+        loader = data_config.get('loader', {})
+        assets = loader.get('assets') or data_config.get('assets', ['coord', 'class'])
+        mode = loader.get('mode') or data_config.get('mode', 'grid')
+        max_loops = loader.get('max_loops') or data_config.get('max_loops')
+        batch_size = loader.get('batch_size') or data_config.get('batch_size', 4)
+        num_workers = loader.get('num_workers') or data_config.get('num_workers', 4)
+        pin_memory = loader.get('pin_memory', True)
+        persistent_workers = loader.get('persistent_workers', True)
+        prefetch_factor = loader.get('prefetch_factor', 2)
+        
+        # 动态批次配置
+        dynamic_batch = loader.get('dynamic_batch', {})
+        use_dynamic_batch = dynamic_batch.get('enabled') if isinstance(dynamic_batch, dict) else data_config.get('use_dynamic_batch', True)
+        max_points = dynamic_batch.get('max_points_train') if isinstance(dynamic_batch, dict) else data_config.get('max_points', 125000)
+        max_points_inference = dynamic_batch.get('max_points_inference') if isinstance(dynamic_batch, dict) else data_config.get('max_points_inference', 125000)
+        
+        # 加权采样
+        use_weighted_sampler = loader.get('weighted_sampler') if isinstance(loader, dict) else data_config.get('use_weighted_sampler', True)
+        
+        # 循环配置
+        loop_config = loader.get('loop', {})
+        train_loop = loop_config.get('train') if isinstance(loop_config, dict) else data_config.get('train_loop', 5)
+        val_loop = loop_config.get('val') if isinstance(loop_config, dict) else data_config.get('val_loop', 5)
+        test_loop = loop_config.get('test') if isinstance(loop_config, dict) else data_config.get('test_loop', 1)
+        predict_loop = loop_config.get('predict') if isinstance(loop_config, dict) else data_config.get('predict_loop', 1)
+        
+        # ========================================
         # 处理变换配置
-        train_transforms = data_config.pop('train_transforms', None)
-        val_transforms = data_config.pop('val_transforms', None)
-        test_transforms = data_config.pop('test_transforms', None)
-        predict_transforms = data_config.pop('predict_transforms', None)
+        # ========================================
+        transforms = data_config.get('transforms', {})
+        
+        # 新结构: data.transforms.train/val/test/predict
+        train_transforms = transforms.get('train') or data_config.get('train_transforms')
+        val_transforms = transforms.get('val') or data_config.get('val_transforms')
+        test_transforms = transforms.get('test') or data_config.get('test_transforms')
+        predict_transforms = transforms.get('predict') or data_config.get('predict_transforms')
         
         # 实例化变换
-        if train_transforms and isinstance(train_transforms[0], dict):
+        if train_transforms and isinstance(train_transforms, list) and len(train_transforms) > 0 and isinstance(train_transforms[0], dict):
             train_transforms = self._instantiate_transforms(train_transforms)
-        if val_transforms and isinstance(val_transforms[0], dict):
+        if val_transforms and isinstance(val_transforms, list) and len(val_transforms) > 0 and isinstance(val_transforms[0], dict):
             val_transforms = self._instantiate_transforms(val_transforms)
-        if test_transforms and isinstance(test_transforms[0], dict):
+        if test_transforms and isinstance(test_transforms, list) and len(test_transforms) > 0 and isinstance(test_transforms[0], dict):
             test_transforms = self._instantiate_transforms(test_transforms)
-        if predict_transforms and isinstance(predict_transforms[0], dict):
+        if predict_transforms and isinstance(predict_transforms, list) and len(predict_transforms) > 0 and isinstance(predict_transforms[0], dict):
             predict_transforms = self._instantiate_transforms(predict_transforms)
         
-        # 移除不属于 DataModule 的配置
-        data_config.pop('num_classes', None)  # 这是派生属性
-        
-        # 打印数据配置
+        # ========================================
+        # 打印配置信息
+        # ========================================
         print_config({
-            '训练数据': data_config.get('train_data', 'N/A'),
-            '验证数据': data_config.get('val_data', 'N/A'),
-            '测试数据': data_config.get('test_data', 'N/A'),
-            '预测数据': data_config.get('predict_data', 'N/A'),
-        }, "📁 数据路径")
-        
-        print_config({
-            '类别数量': len(data_config.get('class_mapping', [])),
-            '类别名称': ', '.join(data_config.get('class_names', [])),
-            '忽略标签': data_config.get('ignore_label', -1),
-        }, "🏷️  类别配置")
+            '训练数据': train_data or 'N/A',
+            '验证数据': val_data or 'N/A',
+            '测试数据': test_data or 'N/A',
+            '预测数据': predict_data or 'N/A',
+        }, "数据路径")
         
         print_config({
-            '采样模式': data_config.get('mode', 'grid'),
-            '批次大小': data_config.get('batch_size', 4),
-            '最大点数(训练)': f"{data_config.get('max_points', 100000):,}",
-            '最大点数(推理)': f"{data_config.get('max_points_inference', 100000):,}",
-            'Workers': data_config.get('num_workers', 4),
-        }, "⚙️  数据加载配置")
+            '类别数量': num_classes or len(class_mapping or []),
+            '类别名称': ', '.join(class_names or []),
+            '忽略标签': ignore_label,
+        }, "类别配置")
         
+        print_config({
+            '采样模式': mode,
+            '批次大小': batch_size,
+            '最大点数(训练)': f"{max_points:,}",
+            '最大点数(推理)': f"{max_points_inference:,}",
+            'Workers': num_workers,
+        }, "数据加载配置")
+        
+        # ========================================
+        # 创建 DataModule
+        # ========================================
         datamodule = BinPklDataModule(
+            train_data=train_data,
+            val_data=val_data,
+            test_data=test_data,
+            predict_data=predict_data,
+            assets=assets,
+            class_mapping=class_mapping,
+            class_names=class_names,
+            ignore_label=ignore_label,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
+            prefetch_factor=prefetch_factor if num_workers > 0 else None,
+            mode=mode,
+            max_loops=max_loops,
+            use_dynamic_batch=use_dynamic_batch,
+            max_points=max_points,
+            use_dynamic_batch_inference=use_dynamic_batch,
+            max_points_inference=max_points_inference,
+            use_weighted_sampler=use_weighted_sampler,
+            train_loop=train_loop,
+            val_loop=val_loop,
+            test_loop=test_loop,
+            predict_loop=predict_loop,
             train_transforms=train_transforms,
             val_transforms=val_transforms,
             test_transforms=test_transforms,
             predict_transforms=predict_transforms,
-            **data_config
         )
         
         return datamodule
@@ -120,6 +201,11 @@ class SemanticSegmentationEngine(BaseEngine):
     def _create_task(self) -> pl.LightningModule:
         """
         创建 SemanticSegmentationTask
+        
+        适配新的配置结构:
+        - data.classes: 类别配置
+        - model.backbone/head: 模型配置
+        - task.init_args: 任务参数
         
         Returns:
             SemanticSegmentationTask 实例
@@ -131,11 +217,12 @@ class SemanticSegmentationEngine(BaseEngine):
         loss_configs = self.config._raw.get('losses', [])
         metric_configs = self.config._raw.get('metrics', [])
         
-        # 从 data 配置获取类别信息
+        # 从 data 配置获取类别信息 (支持新旧两种结构)
         data_config = self.config.data
-        class_mapping = data_config.get('class_mapping')
-        class_names = data_config.get('class_names')
-        ignore_label = data_config.get('ignore_label', -1)
+        classes = data_config.get('classes', {})
+        class_mapping = classes.get('mapping') or data_config.get('class_mapping')
+        class_names = classes.get('names') or data_config.get('class_names')
+        ignore_label = classes.get('ignore_label') if 'ignore_label' in classes else data_config.get('ignore_label', -1)
         
         # 处理损失函数中的类别权重
         if loss_configs and hasattr(self._datamodule, 'train_dataset'):
@@ -147,16 +234,16 @@ class SemanticSegmentationEngine(BaseEngine):
         
         # 获取 task 初始化参数
         task_init_args = task_config.get('init_args', {})
-        learning_rate = task_init_args.get('learning_rate', 1e-3)
+        learning_rate = task_init_args.get('learning_rate', 0.001)
         
         # 打印模型配置
         backbone_name = model_config.get('backbone', {}).get('class_path', 'Unknown').split('.')[-1]
         head_name = model_config.get('head', {}).get('class_path', 'Unknown').split('.')[-1]
         in_channels = model_config.get('backbone', {}).get('init_args', {}).get('in_channels', 'Unknown')
         
-        print(f"  {Colors.DIM}├─{Colors.RESET} Backbone: {Colors.GREEN}{backbone_name}{Colors.RESET}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} Head: {Colors.GREEN}{head_name}{Colors.RESET}")
-        print(f"  {Colors.DIM}└─{Colors.RESET} 输入通道: {Colors.YELLOW}{in_channels}{Colors.RESET}")
+        log_info(f"模型: Backbone={Colors.GREEN}{backbone_name}{Colors.RESET}, "
+                 f"Head={Colors.GREEN}{head_name}{Colors.RESET}, "
+                 f"输入通道={Colors.YELLOW}{in_channels}{Colors.RESET}")
         
         task = SemanticSegmentationTask(
             model_config=model_config,
@@ -174,16 +261,27 @@ class SemanticSegmentationEngine(BaseEngine):
         """
         获取语义分割特定的回调
         
+        从新配置结构读取回调配置:
+        - trainer.callbacks.predict_writer: 预测写入器配置 (推荐位置)
+        - predict_writer: 兼容旧配置位置
+        
         Returns:
             回调列表
         """
         callbacks = []
-        callback_config = self.config._raw.get('callbacks', {})
         
-        # SemanticPredictLasWriter
-        if 'predict_writer' in callback_config:
-            writer_cfg = callback_config['predict_writer']
-            callbacks.append(self._instantiate_class(writer_cfg))
+        # 从 trainer.callbacks 获取配置
+        trainer_config = self.config._raw.get('trainer', {})
+        callback_config = trainer_config.get('callbacks', {})
+        
+        # 获取 predict_writer 配置 (优先级: trainer.callbacks.predict_writer > predict_writer)
+        predict_writer_cfg = callback_config.get('predict_writer') or self.config._raw.get('predict_writer')
+        
+        if predict_writer_cfg:
+            # 检查是否启用
+            enabled = predict_writer_cfg.get('enabled', True)
+            if enabled:
+                callbacks.append(self._instantiate_class(predict_writer_cfg))
         else:
             # 默认预测写入器
             callbacks.append(SemanticPredictLasWriter(
@@ -192,28 +290,16 @@ class SemanticSegmentationEngine(BaseEngine):
                 auto_infer_reverse_mapping=True
             ))
         
-        # TextLoggingCallback
-        callbacks.append(TextLoggingCallback(log_interval=10))
-        
-        # AutoEmptyCacheCallback
-        callbacks.append(AutoEmptyCacheCallback(
-            slowdown_threshold=3.0,
-            absolute_threshold=1.5,
-            clear_interval=0,
-            warmup_steps=10,
-            verbose=True
-        ))
-        
         return callbacks
     
     def _print_config(self) -> None:
         """打印语义分割配置"""
         from ..utils.logger import print_header
-        print_header("DALES 语义分割训练", "🎯")
+        print_header("DALES 语义分割训练")
         
         print_config({
             '运行模式': self.config.mode,
             '随机种子': self.config.seed,
             '输出目录': self.config.output_dir,
             'Checkpoint': self.config.checkpoint_path or 'N/A',
-        }, "⚙️  运行配置")
+        }, "运行配置")
