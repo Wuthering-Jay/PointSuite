@@ -100,7 +100,8 @@ class LASProcessorLogicalIndex:
                  input_path: Union[str, Path],
                  output_dir: Union[str, Path] = None,
                  window_size: Tuple[float, float] = (50.0, 50.0),
-                 overlap: bool = False,
+                 overlap: bool = True,
+                 overlap_factor: int = 1,
                  grid_size: float = 0.5,      # 仅用于生成逻辑索引，不进行物理降采样
                  min_points: int = 1000,
                  max_points: int = 5000,      # 通常不再需要强制切分，因为我们有完美的batch控制
@@ -110,17 +111,11 @@ class LASProcessorLogicalIndex:
         self.output_dir = Path(output_dir) if output_dir else self.input_path.parent
         self.window_size = window_size
         self.overlap = overlap
-        # overlap_ratio = 0.5 if overlap else 0.0
+        self.overlap_factor = overlap_factor if overlap else 1
         self.grid_size = grid_size
         self.min_points = min_points
         self.max_points = max_points
         self.ground_class = ground_class
-        
-        # 计算步长 (Stride)
-        # self.stride = (
-        #     window_size[0] * (1 - overlap_ratio),
-        #     window_size[1] * (1 - overlap_ratio)
-        # )
         
         if not self.output_dir.exists():
             self.output_dir.mkdir(parents=True)
@@ -143,26 +138,68 @@ class LASProcessorLogicalIndex:
         处理所有 LAS/LAZ 文件
         """
 
+        # if n_workers is None:
+        #     n_workers = max(1, multiprocessing.cpu_count() - 1)
+
+        # start_time = time.time()
+
+        # # 美化的标题输出
+        # print(f"\n{Colors.BOLD}{'═'*70}{Colors.RESET}")
+        # print(f"{Colors.BOLD}{Colors.CYAN}  🚀 LAS 逻辑索引分块处理器 (Logical Index Tiling){Colors.RESET}")
+        # print(f"{Colors.BOLD}{'═'*70}{Colors.RESET}")
+        # print(f"  {Colors.DIM}├─{Colors.RESET} 总文件数: {Colors.GREEN}{len(self.las_files)}{Colors.RESET}")
+        # print(f"  {Colors.DIM}├─{Colors.RESET} CPU 核心: {Colors.GREEN}{n_workers}{Colors.RESET}")
+        # grid_size_str = f"{self.grid_size}m" if self.grid_size is not None else "跳过体素化"
+        # print(f"  {Colors.DIM}├─{Colors.RESET} 网格大小: {Colors.YELLOW}{grid_size_str}{Colors.RESET}")
+        # print(f"  {Colors.DIM}├─{Colors.RESET} 窗口大小: {Colors.YELLOW}{self.window_size}m{Colors.RESET}")
+        # print(f"  {Colors.DIM}├─{Colors.RESET} 重叠模式: {Colors.GREEN if self.overlap else Colors.DIM}{'是' if self.overlap else '否'}{Colors.RESET}")
+        # print(f"  {Colors.DIM}├─{Colors.RESET} 点数范围: {Colors.YELLOW}{self.min_points} ~ {self.max_points or '无限制'}{Colors.RESET}")
+        # print(f"  {Colors.DIM}└─{Colors.RESET} 地面类别: {Colors.YELLOW}{self.ground_class or '未指定'}{Colors.RESET}")
+        # print(f"{Colors.BOLD}{'─'*70}{Colors.RESET}\n")
+        
+        # # 顺序处理每个文件，但文件内部并行处理segments
+        # for idx, las_file in enumerate(self.las_files, 1):
+        #     try:
+        #         self.process_file(las_file, n_workers=n_workers, file_idx=idx, total_files=len(self.las_files))
+        #     except Exception as e:
+        #         print(f"\n{Colors.RED}[ERROR] {las_file.name}: {e}{Colors.RESET}")
+        #         import traceback
+        #         traceback.print_exc()
+
+        # elapsed = time.time() - start_time
+        
+        # # 美化的完成输出
+        # print(f"\n{Colors.BOLD}{'═'*70}{Colors.RESET}")
+        # print(f"{Colors.BOLD}{Colors.GREEN}  [OK] 处理完成!{Colors.RESET}")
+        # print(f"  {Colors.DIM}├─{Colors.RESET} ⏱️  总耗时: {Colors.CYAN}{format_time(elapsed)}{Colors.RESET}")
+        # print(f"  {Colors.DIM}└─{Colors.RESET} 📄 平均每文件: {Colors.CYAN}{format_time(elapsed/len(self.las_files))}{Colors.RESET}")
+        # print(f"{Colors.BOLD}{'═'*70}{Colors.RESET}\n")
+
         if n_workers is None:
             n_workers = max(1, multiprocessing.cpu_count() - 1)
 
         start_time = time.time()
+        
+        # 计算覆盖倍率
+        coverage_rate = self.overlap_factor ** 2
 
-        # 美化的标题输出
+        # --- 美化输出 ---
         print(f"\n{Colors.BOLD}{'═'*70}{Colors.RESET}")
-        print(f"{Colors.BOLD}{Colors.CYAN}  🚀 LAS 逻辑索引分块处理器 (Logical Index Tiling){Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.CYAN}  🚀 LAS 逻辑索引分块处理器 (Multi-Grid Sliding Window){Colors.RESET}")
         print(f"{Colors.BOLD}{'═'*70}{Colors.RESET}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} 总文件数: {Colors.GREEN}{len(self.las_files)}{Colors.RESET}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} CPU 核心: {Colors.GREEN}{n_workers}{Colors.RESET}")
-        grid_size_str = f"{self.grid_size}m" if self.grid_size is not None else "跳过体素化"
-        print(f"  {Colors.DIM}├─{Colors.RESET} 网格大小: {Colors.YELLOW}{grid_size_str}{Colors.RESET}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} 窗口大小: {Colors.YELLOW}{self.window_size}m{Colors.RESET}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} 重叠模式: {Colors.GREEN if self.overlap else Colors.DIM}{'是' if self.overlap else '否'}{Colors.RESET}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} 点数范围: {Colors.YELLOW}{self.min_points} ~ {self.max_points or '无限制'}{Colors.RESET}")
-        print(f"  {Colors.DIM}└─{Colors.RESET} 地面类别: {Colors.YELLOW}{self.ground_class or '未指定'}{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 总文件数: {Colors.GREEN}{len(self.las_files)}{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} CPU 核心: {Colors.GREEN}{n_workers}{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 网格大小: {Colors.YELLOW}{self.grid_size}m{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 窗口大小: {Colors.YELLOW}{self.window_size}m{Colors.RESET}")
+        
+        # 🔥 修改重叠模式显示
+        overlap_str = f"是 (Factor={self.overlap_factor}, {coverage_rate}x 覆盖)" if self.overlap else "否"
+        print(f"  {Colors.DIM}├─{Colors.RESET} 重叠模式: {Colors.GREEN if self.overlap else Colors.DIM}{overlap_str}{Colors.RESET}")
+        
+        print(f"  {Colors.DIM}├─{Colors.RESET} 点数范围: {Colors.YELLOW}{self.min_points} ~ {self.max_points or '无限制'}{Colors.RESET}")
+        print(f"  {Colors.DIM}└─{Colors.RESET} 地面类别: {Colors.YELLOW}{self.ground_class or '未指定'}{Colors.RESET}")
         print(f"{Colors.BOLD}{'─'*70}{Colors.RESET}\n")
         
-        # 顺序处理每个文件，但文件内部并行处理segments
         for idx, las_file in enumerate(self.las_files, 1):
             try:
                 self.process_file(las_file, n_workers=n_workers, file_idx=idx, total_files=len(self.las_files))
@@ -172,18 +209,15 @@ class LASProcessorLogicalIndex:
                 traceback.print_exc()
 
         elapsed = time.time() - start_time
-        
-        # 美化的完成输出
         print(f"\n{Colors.BOLD}{'═'*70}{Colors.RESET}")
-        print(f"{Colors.BOLD}{Colors.GREEN}  [OK] 处理完成!{Colors.RESET}")
-        print(f"  {Colors.DIM}├─{Colors.RESET} ⏱️  总耗时: {Colors.CYAN}{format_time(elapsed)}{Colors.RESET}")
-        print(f"  {Colors.DIM}└─{Colors.RESET} 📄 平均每文件: {Colors.CYAN}{format_time(elapsed/len(self.las_files))}{Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.GREEN}  [OK] 处理完成!{Colors.RESET}")
+        print(f"  {Colors.DIM}├─{Colors.RESET} ⏱️  总耗时: {Colors.CYAN}{format_time(elapsed)}{Colors.RESET}")
         print(f"{Colors.BOLD}{'═'*70}{Colors.RESET}\n")
 
     def process_file(self, las_file: Path, n_workers=None, file_idx=1, total_files=1):
 
         print(f"{Colors.BOLD}{'─'*70}{Colors.RESET}")
-        print(f"{Colors.BOLD}{Colors.BLUE}  📄 [{file_idx}/{total_files}] {las_file.name}{Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.BLUE}  📄 [{file_idx}/{total_files}] {las_file.name}{Colors.RESET}")
         print(f"{Colors.BOLD}{'─'*70}{Colors.RESET}")
         file_start = time.time()
 
@@ -192,33 +226,75 @@ class LASProcessorLogicalIndex:
         with laspy.open(las_file) as fh:
             las_data = fh.read()
         t1 = time.time()
-        print(f"  {Colors.DIM}├─{Colors.RESET} 📖 读取LAS: {Colors.GREEN}{format_time(t1-t0)}{Colors.RESET} → {Colors.CYAN}{format_number(len(las_data.points))}{Colors.RESET} 点")
+        print(f"  {Colors.DIM}├─{Colors.RESET} 📖 读取LAS: {Colors.GREEN}{format_time(t1-t0)}{Colors.RESET} → {Colors.CYAN}{format_number(len(las_data.points))}{Colors.RESET} 点")
             
-        # 获取坐标 (laspy 默认返回 float64)
+        # 获取坐标
         t0 = time.time()
         points = np.vstack((las_data.x, las_data.y, las_data.z)).transpose()
         t1 = time.time()
         
         # 2. 滑动窗口切块 (获取索引列表)
         t0 = time.time()
-        result = self.segment_point_cloud(points, n_workers=n_workers)
-        segments_indices, seg1_count, seg2_count = result
+        # 🔥 修改调用接收返回值
+        segments_indices, stats_list = self.segment_point_cloud(points, n_workers=n_workers)
         t1 = time.time()
         
-        # 显示分块信息
-        if self.overlap and seg1_count is not None:
-            print(f"  {Colors.DIM}├─{Colors.RESET} 🔲 分块处理: {Colors.GREEN}{format_time(t1-t0)}{Colors.RESET} → {Colors.CYAN}{len(segments_indices)}{Colors.RESET} 块 ({seg1_count} + {seg2_count})")
+        # 🔥 修改分块信息输出
+        total_segs = len(segments_indices)
+        if self.overlap:
+            # 格式化详细统计: "300+300+290+300"
+            stats_str = "+".join([str(s) for s in stats_list])
+            coverage = self.overlap_factor ** 2
+            print(f"  {Colors.DIM}├─{Colors.RESET} 🔲 分块处理: {Colors.GREEN}{format_time(t1-t0)}{Colors.RESET} → {Colors.CYAN}{total_segs}{Colors.RESET} 块")
+            print(f"  {Colors.DIM}│{Colors.RESET}  🔍 {Colors.YELLOW}{coverage}x{Colors.RESET} 覆盖详情: ({stats_str})")
         else:
-            print(f"  {Colors.DIM}├─{Colors.RESET} 🔲 分块处理: {Colors.GREEN}{format_time(t1-t0)}{Colors.RESET} → {Colors.CYAN}{len(segments_indices)}{Colors.RESET} 块")
+            print(f"  {Colors.DIM}├─{Colors.RESET} 🔲 分块处理: {Colors.GREEN}{format_time(t1-t0)}{Colors.RESET} → {Colors.CYAN}{total_segs}{Colors.RESET} 块")
         
         # 3. 处理并保存
         t0 = time.time()
         self._save_bin_pkl(las_file, las_data, segments_indices)
         t1 = time.time()
         
-        # 总耗时
         total_time = time.time() - file_start
-        print(f"  {Colors.DIM}└─{Colors.RESET} ⏱️  文件总耗时: {Colors.BOLD}{Colors.GREEN}{format_time(total_time)}{Colors.RESET}")
+        print(f"  {Colors.DIM}└─{Colors.RESET} ⏱️  文件总耗时: {Colors.BOLD}{Colors.GREEN}{format_time(total_time)}{Colors.RESET}")
+
+        # print(f"{Colors.BOLD}{'─'*70}{Colors.RESET}")
+        # print(f"{Colors.BOLD}{Colors.BLUE}  📄 [{file_idx}/{total_files}] {las_file.name}{Colors.RESET}")
+        # print(f"{Colors.BOLD}{'─'*70}{Colors.RESET}")
+        # file_start = time.time()
+
+        # # 1. 读取数据
+        # t0 = time.time()
+        # with laspy.open(las_file) as fh:
+        #     las_data = fh.read()
+        # t1 = time.time()
+        # print(f"  {Colors.DIM}├─{Colors.RESET} 📖 读取LAS: {Colors.GREEN}{format_time(t1-t0)}{Colors.RESET} → {Colors.CYAN}{format_number(len(las_data.points))}{Colors.RESET} 点")
+            
+        # # 获取坐标 (laspy 默认返回 float64)
+        # t0 = time.time()
+        # points = np.vstack((las_data.x, las_data.y, las_data.z)).transpose()
+        # t1 = time.time()
+        
+        # # 2. 滑动窗口切块 (获取索引列表)
+        # t0 = time.time()
+        # result = self.segment_point_cloud(points, n_workers=n_workers)
+        # segments_indices, seg1_count, seg2_count = result
+        # t1 = time.time()
+        
+        # # 显示分块信息
+        # if self.overlap and seg1_count is not None:
+        #     print(f"  {Colors.DIM}├─{Colors.RESET} 🔲 分块处理: {Colors.GREEN}{format_time(t1-t0)}{Colors.RESET} → {Colors.CYAN}{len(segments_indices)}{Colors.RESET} 块 ({seg1_count} + {seg2_count})")
+        # else:
+        #     print(f"  {Colors.DIM}├─{Colors.RESET} 🔲 分块处理: {Colors.GREEN}{format_time(t1-t0)}{Colors.RESET} → {Colors.CYAN}{len(segments_indices)}{Colors.RESET} 块")
+        
+        # # 3. 处理并保存
+        # t0 = time.time()
+        # self._save_bin_pkl(las_file, las_data, segments_indices)
+        # t1 = time.time()
+        
+        # # 总耗时
+        # total_time = time.time() - file_start
+        # print(f"  {Colors.DIM}└─{Colors.RESET} ⏱️  文件总耗时: {Colors.BOLD}{Colors.GREEN}{format_time(total_time)}{Colors.RESET}")
 
     def segment_point_cloud(self, points: np.ndarray, n_workers: int = 4) -> List[np.ndarray]:
         """
@@ -232,27 +308,74 @@ class LASProcessorLogicalIndex:
             List of segment indices
         """
         import time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         
-        if not self.overlap:
-            # 正常模式：单次网格分割
-            t0 = time.time()
-            segments = self._grid_segmentation(points, offset_x=0, offset_y=0, n_workers=n_workers, show_details=False)
-            return segments, None, None
-        else:
-            # Overlap模式：两次网格分割（偏移半个窗口）
-            x_size, y_size = self.window_size
+        # if not self.overlap:
+        #     # 正常模式：单次网格分割
+        #     t0 = time.time()
+        #     segments = self._grid_segmentation(points, offset_x=0, offset_y=0, n_workers=n_workers, show_details=False)
+        #     return segments, None, None
+        # else:
+        #     # Overlap模式：两次网格分割（偏移半个窗口）
+        #     x_size, y_size = self.window_size
             
-            # 第一次分割：正常网格
-            t0 = time.time()
-            segments1 = self._grid_segmentation(points, offset_x=0, offset_y=0, n_workers=n_workers, show_details=False)
+        #     # 第一次分割：正常网格
+        #     t0 = time.time()
+        #     segments1 = self._grid_segmentation(points, offset_x=0, offset_y=0, n_workers=n_workers, show_details=False)
             
-            # 第二次分割：偏移半个窗口
-            segments2 = self._grid_segmentation(points, offset_x=x_size/2, offset_y=y_size/2, n_workers=n_workers, show_details=False)
+        #     # 第二次分割：偏移半个窗口
+        #     segments2 = self._grid_segmentation(points, offset_x=x_size/2, offset_y=y_size/2, n_workers=n_workers, show_details=False)
             
-            # 合并两次分割结果
-            all_segments = segments1 + segments2
+        #     # 合并两次分割结果
+        #     all_segments = segments1 + segments2
             
-            return all_segments, len(segments1), len(segments2)
+        #     return all_segments, len(segments1), len(segments2)
+
+        x_size, y_size = self.window_size
+        
+        # 1. 生成偏移量配置
+        # np.linspace(0, 1, factor, endpoint=False) -> e.g. [0.0, 0.5] for factor=2
+        steps = np.linspace(0, 1, self.overlap_factor, endpoint=False)
+        offset_configs = []
+        for sx in steps:
+            for sy in steps:
+                offset_configs.append((sx * x_size, sy * y_size))
+        
+        # 2. 如果只有一种配置（无重叠），直接运行
+        if len(offset_configs) == 1:
+            segments = self._grid_segmentation(points, offset_x=0, offset_y=0, n_workers=n_workers)
+            return segments, [len(segments)]
+
+        # 3. 多线程并行处理所有偏移配置
+        all_segments = []
+        stats_list = [0] * len(offset_configs) # 预分配用于保持顺序 (可选，这里用字典存结果更稳妥)
+        
+        # 这里的 n_workers 用于控制有多少个 offset_config 同时计算
+        # 注意：子任务 _grid_segmentation 内部设为串行 (n_workers=1)，防止线程爆炸
+        max_overlap_workers = min(len(offset_configs), n_workers)
+        
+        with ThreadPoolExecutor(max_workers=max_overlap_workers) as executor:
+            # 提交任务，记录 index 以便统计
+            future_to_idx = {
+                executor.submit(
+                    self._grid_segmentation, 
+                    points, 
+                    config[0], # offset_x
+                    config[1], # offset_y
+                    n_workers=1 # 🔥 子任务内部不再多线程
+                ): i for i, config in enumerate(offset_configs)
+            }
+            
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    segs = future.result()
+                    stats_list[idx] = len(segs) # 记录该轮的数量
+                    all_segments.extend(segs)
+                except Exception as e:
+                    print(f"{Colors.RED}Segment generation failed for config {idx}: {e}{Colors.RESET}")
+        
+        return all_segments, stats_list
         
     def _grid_segmentation(self, points: np.ndarray, offset_x: float = 0, offset_y: float = 0, n_workers: int = 4, show_details: bool = False) -> List[np.ndarray]:
         """
@@ -677,6 +800,7 @@ class LASProcessorLogicalIndex:
             'dtype': dtype_list,
             'window_size': self.window_size,
             'overlap': self.overlap,
+            'overlap_factor': self.overlap_factor,
             'min_points': self.min_points,
             'max_points': self.max_points,
             'segments': segments_info,
@@ -699,7 +823,7 @@ if __name__ == "__main__":
         input_path=r"E:\data\DALES\dales_las\test",
         output_dir=r"E:\data\DALES\dales_las\bin_logical\test",
         window_size=(50.0, 50.0),
-        overlap=False, 
+        overlap_factor=2,
         grid_size=0.5,     # 统一 Grid Size
         min_points=5000,
         max_points=None,

@@ -642,9 +642,9 @@ if __name__ == "__main__":
     # )
     
     # 示例3: 转换单个文件
-    bin_file = r"E:\data\DALES\dales_las\bin\train_logical\5080_54435.bin"
-    pkl_file = r"E:\data\DALES\dales_las\bin\train_logical\5080_54435.pkl"
-    output_dir = r"E:\data\DALES\dales_las\bin\train_logical\las_test"
+    bin_file = r"E:\data\DALES\dales_las\bin_logical\test\5080_54400.bin"
+    pkl_file = r"E:\data\DALES\dales_las\bin_logical\test\5080_54400.pkl"
+    output_dir = r"E:\data\DALES\dales_las\bin_logical\las_test"
     
     if Path(bin_file).exists() and Path(pkl_file).exists():
         # 全量模式测试
