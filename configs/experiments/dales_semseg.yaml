@@ -84,7 +84,7 @@ trainer:
     # 将预测结果保存为 LAS 格式点云文件
     predict_writer:
       enabled: true                # 是否启用此回调
-      class_path: pointsuite.utils.callbacks.SemanticPredictLasWriter
+      class_path: SemanticPredictLasWriter
       init_args:
         # 输出目录: 预测结果保存位置
         # 使用 ${run.output_dir} 确保与主输出目录一致
@@ -113,7 +113,7 @@ trainer:
 # Task 封装了: 模型前向传播、损失计算、指标计算、优化器配置
 task:
   # 任务类路径: 语义分割任务
-  class_path: pointsuite.tasks.SemanticSegmentationTask
+  class_path: SemanticSegmentationTask
   init_args:
     # 初始学习率 (会被 trainer.optimizer 配置覆盖)
     learning_rate: 0.001
@@ -140,7 +140,7 @@ losses:
   # 交叉熵损失 (Cross Entropy Loss)
   # 分类任务的标准损失函数，衡量预测分布与真实分布的差异
   - name: ce_loss                                          # 损失名称 (用于日志显示)
-    class_path: pointsuite.models.losses.CrossEntropyLoss  # 损失函数类路径
+    class_path: CrossEntropyLoss  # 损失函数类路径
     init_args:
       # 忽略索引: 该标签的点不参与损失计算
       ignore_index: ${data.classes.ignore_label}
@@ -179,7 +179,7 @@ metrics:
   # 语义分割指标集合
   # 包含: mIoU, OA (Overall Accuracy), Per-class IoU, F1 等
   - name: seg_metrics                                      # 指标名称 (用于日志显示)
-    class_path: pointsuite.utils.metrics.semantic_segmentation.SegmentationMetrics
+    class_path: SegmentationMetrics
     init_args:
       # 类别数量: 用于初始化混淆矩阵
       num_classes: ${data.classes.num_classes}

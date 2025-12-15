@@ -36,6 +36,7 @@ from ..utils.config import (
     load_yaml,
     save_yaml,
     deep_merge,
+    import_class,
 )
 from ..utils.logger import setup_logger, Colors, print_header, print_section, print_config, log_info, log_warning
 
@@ -262,9 +263,7 @@ class BaseEngine(ABC):
         Returns:
             类对象
         """
-        module_name, class_name = class_path.rsplit('.', 1)
-        module = importlib.import_module(module_name)
-        return getattr(module, class_name)
+        return import_class(class_path)
     
     def _instantiate_class(
         self,

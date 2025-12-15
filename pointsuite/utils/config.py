@@ -25,9 +25,63 @@ import os
 import yaml
 import re
 import copy
+import importlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Type
 from dataclasses import dataclass, field
+
+
+def import_class(class_path: str) -> Type:
+    """
+    从字符串路径导入类
+    支持完整路径 (e.g. 'pointsuite.models.PointTransformerV2')
+    和简写 (e.g. 'PointTransformerV2', 会自动搜索常用包)
+    
+    Args:
+        class_path: 类路径或类名
+        
+    Returns:
+        导入的类对象
+        
+    Raises:
+        ImportError: 如果无法找到类
+    """
+    # 1. 尝试直接导入 (完整路径)
+    if '.' in class_path:
+        try:
+            module_name, class_name = class_path.rsplit('.', 1)
+            module = importlib.import_module(module_name)
+            return getattr(module, class_name)
+        except (ImportError, AttributeError):
+            # 如果直接导入失败，继续尝试搜索路径
+            pass
+
+    # 2. 常用包搜索路径
+    search_packages = [
+        'pointsuite.data.transforms',
+        'pointsuite.models',
+        'pointsuite.models.losses',
+        'pointsuite.models.backbones',
+        'pointsuite.models.heads',
+        'pointsuite.utils.metrics',
+        'pointsuite.utils.metrics.semantic_segmentation',
+        'pointsuite.utils.callbacks',
+        'pointsuite.tasks',
+        'torch.optim',
+        'torch.optim.lr_scheduler',
+        'torch.nn',
+    ]
+
+    for package in search_packages:
+        try:
+            module = importlib.import_module(package)
+            if hasattr(module, class_path):
+                return getattr(module, class_path)
+        except ImportError:
+            continue
+    
+    # 3. 如果都找不到，抛出异常
+    raise ImportError(f"无法找到类: {class_path} (已搜索常用路径)")
 
 
 def _convert_scientific_notation(config: Any) -> Any:

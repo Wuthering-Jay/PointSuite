@@ -20,7 +20,7 @@
 # ════════════════════════════════════════════════════════════════════════════
 # U-Net 结构: Encoder 下采样提取特征，Decoder 上采样恢复分辨率
 backbone:
-  class_path: pointsuite.models.PointTransformerV2
+  class_path: PointTransformerV2
   init_args:
     # ─────────────────────────────────────────────────────────────
     # 输入配置
@@ -90,7 +90,7 @@ backbone:
 # ════════════════════════════════════════════════════════════════════════════
 # 将 Backbone 输出的特征映射到类别预测
 head:
-  class_path: pointsuite.models.SegHead
+  class_path: SegHead
   init_args:
     # 输入通道数: 必须与 Decoder 最后一层输出匹配
     # 对应 dec_channels[0] = 24

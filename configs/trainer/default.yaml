@@ -158,7 +158,7 @@ callbacks:
 # ════════════════════════════════════════════════════════════════════════════
 optimizer:
   # 优化器类路径
-  class_path: torch.optim.AdamW
+  class_path: AdamW
   init_args:
     # 学习率: 最重要的超参数之一
     lr: 0.001
@@ -173,7 +173,7 @@ optimizer:
 # ════════════════════════════════════════════════════════════════════════════
 lr_scheduler:
   # 调度器类路径
-  class_path: torch.optim.lr_scheduler.CosineAnnealingLR
+  class_path: CosineAnnealingLR
   init_args:
     # T_max: 余弦周期长度
     #   - null: 自动设置为 total_steps (一个完整余弦周期)

@@ -7,6 +7,7 @@ import yaml
 from typing import List, Dict, Any
 
 from ..utils.logger import log_warning, log_error, Colors
+from ..utils.config import import_class
 
 class BaseTask(pl.LightningModule):
     """
@@ -158,9 +159,7 @@ class BaseTask(pl.LightningModule):
 
     def _import_class(self, class_path: str) -> type:
         """一个辅助函数，用于从字符串路径动态导入类"""
-        module_name, class_name = class_path.rsplit('.', 1)
-        module = importlib.import_module(module_name)
-        return getattr(module, class_name)
+        return import_class(class_path)
 
     def _calculate_total_loss(self, preds: Any, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """

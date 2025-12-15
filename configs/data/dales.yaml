@@ -123,80 +123,80 @@ transforms:
   # ─────────────────────────────────────────────────────────────
   train:
     # 中心偏移: 将点云中心移动到原点
-    - class_path: pointsuite.data.transforms.CenterShift
+    - class_path: CentroidShift
     
     # 随机丢弃: 随机移除部分点，模拟遮挡
-    - class_path: pointsuite.data.transforms.RandomDropout
+    - class_path: RandomDropout
       init_args:
         dropout_ratio: 0.2    # 最大丢弃比例 20%
         p: 0.5                # 执行概率 50%
     
     # 随机旋转: 绕指定轴旋转
-    - class_path: pointsuite.data.transforms.RandomRotate
+    - class_path: RandomRotate
       init_args:
         angle: [-1, 1]        # 旋转角度范围 (弧度)
         axis: z               # 旋转轴
         p: 0.5                # 执行概率
     
     # 随机缩放: 等比例缩放点云
-    - class_path: pointsuite.data.transforms.RandomScale
+    - class_path: RandomScale
       init_args:
         scale: [0.9, 1.1]     # 缩放范围 90%-110%
     
     # 随机翻转: 沿坐标轴镜像翻转
-    - class_path: pointsuite.data.transforms.RandomFlip
+    - class_path: RandomFlip
       init_args:
         p: 0.5                # 执行概率
     
     # 随机抖动: 给坐标添加高斯噪声
-    - class_path: pointsuite.data.transforms.RandomJitter
+    - class_path: RandomJitter
       init_args:
         sigma: 0.005          # 噪声标准差
         clip: 0.02            # 噪声裁剪范围
     
     # 收集器: 整理输出字段
-    - class_path: pointsuite.data.transforms.Collect
+    - class_path: Collect
       init_args:
         keys: ['coord', 'class']        # 输出的主要字段
         feat_keys:                       # 特征字段组合
           feat: ['coord', 'echo']        # feat = coord(3) + echo(2) = 5 维
     
     # 转换为张量: numpy -> torch.Tensor
-    - class_path: pointsuite.data.transforms.ToTensor
+    - class_path: ToTensor
 
   # ─────────────────────────────────────────────────────────────
   # 验证阶段增强 (无随机变换)
   # ─────────────────────────────────────────────────────────────
   val:
-    - class_path: pointsuite.data.transforms.CenterShift
-    - class_path: pointsuite.data.transforms.Collect
+    - class_path: CentroidShift
+    - class_path: Collect
       init_args:
         keys: ['coord', 'class']
         feat_keys:
           feat: ['coord', 'echo']
-    - class_path: pointsuite.data.transforms.ToTensor
+    - class_path: ToTensor
 
   # ─────────────────────────────────────────────────────────────
   # 测试阶段增强 (与验证相同)
   # ─────────────────────────────────────────────────────────────
   test:
-    - class_path: pointsuite.data.transforms.CenterShift
-    - class_path: pointsuite.data.transforms.Collect
+    - class_path: CentroidShift
+    - class_path: Collect
       init_args:
         keys: ['coord', 'class']
         feat_keys:
           feat: ['coord', 'echo']
-    - class_path: pointsuite.data.transforms.ToTensor
+    - class_path: ToTensor
 
   # ─────────────────────────────────────────────────────────────
   # 预测阶段增强 (保留索引信息用于结果写回)
   # ─────────────────────────────────────────────────────────────
   predict:
-    - class_path: pointsuite.data.transforms.CenterShift
-    - class_path: pointsuite.data.transforms.Collect
+    - class_path: CentroidShift
+    - class_path: Collect
       init_args:
         # 预测时需要保留文件路径和索引，用于结果写回
         keys: ['coord', 'indices', 'bin_file', 'bin_path', 'pkl_path']
         feat_keys:
           feat: ['coord', 'echo']
-    - class_path: pointsuite.data.transforms.ToTensor
+    - class_path: ToTensor
