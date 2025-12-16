@@ -38,7 +38,16 @@ from ..utils.config import (
     deep_merge,
     import_class,
 )
-from ..utils.logger import setup_logger, Colors, print_header, print_section, print_config, log_info, log_warning
+from ..utils.logger import (
+    setup_logger,
+    Colors,
+    print_header,
+    print_section,
+    print_config,
+    log_info,
+    log_warning,
+    log_success,
+)
 
 
 class BaseEngine(ABC):
@@ -671,7 +680,8 @@ class BaseEngine(ABC):
         
         mode = self.config.mode
         
-        if mode == 'train':
+        if mode in ['train', 'full']:
+            # train 和 full 模式都执行完整训练
             self.trainer.fit(self.task, self.datamodule)
             
         elif mode == 'resume':
@@ -711,7 +721,14 @@ class BaseEngine(ABC):
             if self.config.mode == 'test':
                 ckpt_path = self.config.checkpoint_path
             else:
-                ckpt_path = 'best'
+                # 尝试使用最佳模型，如果没有则使用 last
+                ckpt_path = self._get_best_or_last_ckpt()
+        
+        if ckpt_path:
+            log_info(f"使用检查点: {ckpt_path}")
+            # 手动加载 checkpoint 以使用 strict=False
+            self._load_checkpoint_for_eval(ckpt_path)
+            ckpt_path = None  # 已手动加载，不需要 trainer 再加载
         
         self.trainer.test(self.task, self.datamodule, ckpt_path=ckpt_path)
         return self
@@ -736,7 +753,14 @@ class BaseEngine(ABC):
             if self.config.mode == 'test':
                 ckpt_path = self.config.checkpoint_path
             else:
-                ckpt_path = 'best'
+                # 尝试使用最佳模型，如果没有则使用 last
+                ckpt_path = self._get_best_or_last_ckpt()
+        
+        if ckpt_path:
+            log_info(f"使用检查点: {ckpt_path}")
+            # 手动加载 checkpoint 以使用 strict=False
+            self._load_checkpoint_for_eval(ckpt_path)
+            ckpt_path = None  # 已手动加载，不需要 trainer 再加载
         
         self.trainer.predict(self.task, datamodule=self.datamodule, ckpt_path=ckpt_path)
         return self
@@ -791,6 +815,60 @@ class BaseEngine(ABC):
     # 辅助方法
     # ========================================================================
     
+    def _get_best_or_last_ckpt(self) -> Optional[str]:
+        """
+        获取最佳或最后的检查点路径
+        
+        优先使用 ModelCheckpoint 保存的最佳模型，
+        如果没有则使用 last.ckpt，
+        如果都没有则返回 None（使用当前模型权重）
+        
+        Returns:
+            检查点路径或 None
+        """
+        from pathlib import Path
+        
+        # 尝试从 ModelCheckpoint 获取最佳模型路径
+        if hasattr(self.trainer, 'checkpoint_callback') and self.trainer.checkpoint_callback:
+            best_path = self.trainer.checkpoint_callback.best_model_path
+            if best_path and Path(best_path).exists():
+                return best_path
+        
+        # 尝试使用 last.ckpt
+        ckpt_dir = Path(self.config.output_dir) / 'checkpoints'
+        last_ckpt = ckpt_dir / 'last.ckpt'
+        if last_ckpt.exists():
+            log_warning("未找到最佳模型，使用 last.ckpt")
+            return str(last_ckpt)
+        
+        # 都没有，使用当前权重
+        log_warning("未找到检查点，使用当前模型权重")
+        return None
+    
+    def _load_checkpoint_for_eval(self, ckpt_path: str) -> None:
+        """
+        加载 checkpoint 用于测试/预测（使用 strict=False）
+        
+        Args:
+            ckpt_path: checkpoint 路径
+        """
+        checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        state_dict = checkpoint.get('state_dict', checkpoint)
+        
+        # 使用 strict=False 加载，忽略不匹配的键（如损失函数的 weight）
+        missing_keys, unexpected_keys = self.task.load_state_dict(state_dict, strict=False)
+        
+        # 只报告模型相关的缺失键，忽略损失函数相关的
+        model_missing = [k for k in missing_keys if not k.startswith('losses.')]
+        model_unexpected = [k for k in unexpected_keys if not k.startswith('losses.')]
+        
+        if model_missing:
+            log_warning(f"缺失的模型键: {model_missing[:5]}...")
+        if model_unexpected:
+            log_warning(f"未预期的模型键: {model_unexpected[:5]}...")
+        
+        log_info(f"{Colors.GREEN}[OK] 检查点加载完成{Colors.RESET}")
+    
     def _load_pretrained_weights(self, ckpt_path: str) -> None:
         """
         加载预训练权重 (用于 finetune)
@@ -819,29 +897,61 @@ class BaseEngine(ABC):
     
     def _print_config(self) -> None:
         """打印配置信息"""
+        from ..utils.logger import log_to_file_only
+        
         print_header(f"{self.TASK_TYPE.upper()} 任务")
         
+        # 终端输出简化版配置
         print_config({
             '运行模式': self.config.mode,
             '随机种子': self.config.seed,
             '输出目录': self.config.output_dir,
         }, "运行配置")
+        
+        # 终端输出数据和模型摘要
+        data_config = self.config.get('data', {})
+        model_config = self.config.get('model', {})
+        trainer_config = self.config.get('trainer', {})
+        
+        print_config({
+            '训练数据': data_config.get('paths', {}).get('train', 'N/A'),
+            '验证数据': data_config.get('paths', {}).get('val', 'N/A'),
+            '类别数': data_config.get('classes', {}).get('num_classes', 'N/A'),
+            'Batch Size': data_config.get('loader', {}).get('batch_size', 'N/A'),
+        }, "数据配置")
+        
+        print_config({
+            'Backbone': model_config.get('backbone', {}).get('class_path', 'N/A'),
+            'Head': model_config.get('head', {}).get('class_path', 'N/A'),
+        }, "模型配置")
+        
+        print_config({
+            'Max Epochs': trainer_config.get('training', {}).get('max_epochs', 'N/A'),
+            '精度': trainer_config.get('training', {}).get('precision', 'N/A'),
+            '优化器': trainer_config.get('optimizer', {}).get('class_path', 'N/A'),
+        }, "训练配置")
 
-        # 记录完整配置
-        print_section("完整配置")
+        # 完整配置只写入日志文件
+        log_to_file_only("\n" + "=" * 70)
+        log_to_file_only("  完整配置 (仅日志文件)")
+        log_to_file_only("=" * 70)
         try:
             import yaml
-            print(yaml.dump(self.config.to_dict(), allow_unicode=True, default_flow_style=False, sort_keys=False))
+            config_yaml = yaml.dump(self.config.to_dict(), allow_unicode=True, default_flow_style=False, sort_keys=False)
+            log_to_file_only(config_yaml)
         except ImportError:
-            log_warning("未安装 PyYAML，无法打印完整配置 YAML")
-            print(self.config.to_dict())
+            log_to_file_only(str(self.config.to_dict()))
+        log_to_file_only("=" * 70 + "\n")
     
     def _print_trainer_info(self) -> None:
         """打印 Trainer 信息"""
-        device_name = 'GPU (CUDA)' if torch.cuda.is_available() else 'CPU'
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            device_name = f'GPU ({gpu_name})'
+        else:
+            device_name = 'CPU'
         log_info(f"设备: {Colors.GREEN}{device_name}{Colors.RESET}, "
-                 f"精度: {Colors.GREEN}{self.trainer.precision}{Colors.RESET}, "
-                 f"Epochs: {Colors.GREEN}{self.config.trainer.get('max_epochs', 100)}{Colors.RESET}")
+                 f"精度: {Colors.GREEN}{self.trainer.precision}{Colors.RESET}")
     
     def _print_completion(self) -> None:
         """打印完成信息"""

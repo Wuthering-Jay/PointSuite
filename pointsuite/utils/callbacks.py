@@ -13,15 +13,23 @@ from pytorch_lightning.callbacks import Callback
 import datetime
 
 from .mapping import ClassMapping, ClassMappingInput, create_reverse_mapping
-from .logger import log_warning, log_error, log_info, log_success, Colors
+from .logger import (
+    Colors,
+    log_info,
+    log_warning,
+    log_error,
+    log_success,
+    print_header,
+    print_section,
+    format_points,
+)
 
-
-# 导入 laspy (您需要 'pip install laspy')
+# 导入 laspy
 try:
     import laspy
 except ImportError:
-    log_warning("'laspy' 库未安装。PredictionWriter 将无法保存 .las 文件。")
-    log_warning("请运行: pip install laspy")
+    log_warning("laspy not installed. PredictionWriter cannot save .las files.")
+    log_warning("Please run: pip install laspy")
 
 
 # ============================================
@@ -767,15 +775,15 @@ class TextLoggingCallback(Callback):
 
     def on_validation_epoch_start(self, trainer, pl_module):
         self._reset_timer()
-        print(f"\n{self.Colors.BOLD}{self.Colors.BLUE}  📊 验证中...{self.Colors.RESET}")
+        print(f"\n{self.Colors.BOLD}{self.Colors.BLUE}  [Val] 验证中...{self.Colors.RESET}")
     
     def on_test_epoch_start(self, trainer, pl_module):
         self._reset_timer()
-        print(f"\n{self.Colors.BOLD}{self.Colors.CYAN}  🧪 测试中...{self.Colors.RESET}")
+        print(f"\n{self.Colors.BOLD}{self.Colors.CYAN}  [Test] 测试中...{self.Colors.RESET}")
 
     def on_predict_epoch_start(self, trainer, pl_module):
         self._reset_timer()
-        print(f"\n{self.Colors.BOLD}{self.Colors.MAGENTA}  🔮 预测中...{self.Colors.RESET}")
+        print(f"\n{self.Colors.BOLD}{self.Colors.MAGENTA}  [Pred] 预测中...{self.Colors.RESET}")
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         self._log_batch(trainer, pl_module, batch, batch_idx, stage="Train")
@@ -890,7 +898,8 @@ class TextLoggingCallback(Callback):
                         name = k.replace("_step", "").replace("train_", "")
                         name_map = {
                             "ce_loss": "CE", "lovasz_loss": "LOV", 
-                            "dice_loss": "DICE", "focal_loss": "FOCAL", "lac_loss": "LAC"
+                            "dice_loss": "DICE", "focal_loss": "FOCAL", "lac_loss": "LAC",
+                            "sacb_loss": "SACB"
                         }
                         name = name_map.get(name, name)
                         val = v.item() if hasattr(v, 'item') else v
@@ -1114,7 +1123,7 @@ class SemanticPredictLasWriter(BasePredictionWriter):
     def _infer_class_mapping(self, trainer, pl_module):
         """推断反向类别映射"""
         if self.reverse_class_mapping is not None:
-            print(f"  ℹ️  使用用户提供的 reverse_class_mapping")
+            print(f"  [INFO] 使用用户提供的 reverse_class_mapping")
             return
         
         if not self.auto_infer_reverse_mapping:
@@ -1128,7 +1137,7 @@ class SemanticPredictLasWriter(BasePredictionWriter):
                     # 使用 create_reverse_mapping 处理 Dict 或 List
                     self.reverse_class_mapping = create_reverse_mapping(mapping)
                     self._mapping_inferred = True
-                    print(f"  ℹ️  从模型 checkpoint 加载 reverse_class_mapping")
+                    print(f"  [INFO] 从模型 checkpoint 加载 reverse_class_mapping")
                     return
         except Exception:
             pass
@@ -1140,9 +1149,9 @@ class SemanticPredictLasWriter(BasePredictionWriter):
                 # 使用 create_reverse_mapping 处理 Dict 或 List
                 self.reverse_class_mapping = create_reverse_mapping(datamodule.class_mapping)
                 self._mapping_inferred = True
-                print(f"  ℹ️  从 DataModule 推断 reverse_class_mapping")
+                print(f"  [INFO] 从 DataModule 推断 reverse_class_mapping")
             else:
-                print(f"  ℹ️  未找到 class_mapping，使用连续标签")
+                print(f"  [INFO] 未找到 class_mapping，使用连续标签")
         except Exception as e:
             print(f"  [WARN] 无法推断 reverse_class_mapping: {e}")
 
@@ -1210,7 +1219,7 @@ class SemanticPredictLasWriter(BasePredictionWriter):
                     self.num_classes = pl_module.head.num_classes
             elif hasattr(pl_module, 'num_classes'):
                 self.num_classes = pl_module.num_classes
-            print(f"  ℹ️  从模型推断类别数: {self.num_classes}")
+            print(f"  [INFO] 从模型推断类别数: {self.num_classes}")
         except Exception:
             print("  [ERROR] 无法从模型推断 num_classes，请显式指定")
 
@@ -1223,7 +1232,7 @@ class SemanticPredictLasWriter(BasePredictionWriter):
 
     def _cleanup_temp_files(self, tmp_files, pl_module):
         print()
-        print("  🧹 清理临时文件...")
+        print("  [CLEANUP] 清理临时文件...")
         for f in tmp_files:
             try:
                 if os.path.exists(f): os.remove(f)
@@ -1270,7 +1279,7 @@ class SemanticPredictLasWriter(BasePredictionWriter):
         
         output_path = os.path.join(self.output_dir, f"{bin_basename}.las")
         self._save_las_file(output_path, xyz, final_preds, metadata, pl_module)
-        print(f"  │  📄 已保存: {Path(output_path).name}")
+        print(f"  │  [OK] 已保存: {Path(output_path).name}")
         
         # 6. 保存 Logits
         if self.save_logits:
@@ -1281,7 +1290,7 @@ class SemanticPredictLasWriter(BasePredictionWriter):
                 predictions=final_preds,
                 counts=counts.numpy()
             )
-            print(f"  │  📄 已保存 Logits: {Path(logits_path).name}")
+            print(f"  │  [OK] 已保存 Logits: {Path(logits_path).name}")
 
     def _get_file_paths(self, bin_basename, tmp_files, trainer, pl_module):
         """获取 bin 和 pkl 文件路径"""

@@ -1,18 +1,65 @@
+"""
+语义分割任务模块
+
+该模块实现了点云语义分割的完整任务逻辑，继承自 BaseTask。
+
+功能特性：
+- 支持任意 backbone + head 组合
+- 自动追踪最佳 mIoU
+- 详细的每类指标打印
+- 预测结果导出支持
+
+配置示例
+--------
+.. code-block:: yaml
+
+    model:
+        backbone:
+            class_path: pointsuite.models.backbones.ptv2.PointTransformerV2
+            init_args:
+                in_channels: 6
+        head:
+            class_path: pointsuite.models.heads.SegmentationHead
+            init_args:
+                in_channels: 512
+                num_classes: 8
+"""
+
 import torch
 import torch.nn as nn
 import numpy as np
 from typing import Dict, Any, List, Optional
 
 from .base_task import BaseTask
-from ..utils.logger import Colors, log_warning
+from ..utils.logger import (
+    Colors,
+    log_info,
+    log_warning,
+    print_header,
+    print_section,
+)
+from ..utils.config import import_class
 
 
-# 辅助函数：计算字符串的显示宽度（中文字符占 2 个宽度）
 def _display_width(s: str) -> int:
-    """计算字符串的显示宽度（中文字符占 2 个宽度）"""
+    """
+    计算字符串的显示宽度
+    
+    中文字符占 2 个宽度，其他字符占 1 个宽度。
+    
+    参数
+    ----
+    s : str
+        输入字符串
+        
+    返回
+    ----
+    int
+        显示宽度
+    """
     width = 0
     for c in s:
-        if '\u4e00' <= c <= '\u9fff':  # CJK 统一汉字
+        if '\u4e00' <= c <= '\u9fff':
             width += 2
         else:
             width += 1
@@ -20,7 +67,21 @@ def _display_width(s: str) -> int:
 
 
 def _pad_to_width(s: str, target_width: int) -> str:
-    """将字符串填充到指定显示宽度"""
+    """
+    将字符串填充到指定显示宽度
+    
+    参数
+    ----
+    s : str
+        输入字符串
+    target_width : int
+        目标宽度
+        
+    返回
+    ----
+    str
+        填充后的字符串
+    """
     current_width = _display_width(s)
     padding = target_width - current_width
     return s + ' ' * max(0, padding)
@@ -28,36 +89,58 @@ def _pad_to_width(s: str, target_width: int) -> str:
 
 class SemanticSegmentationTask(BaseTask):
     """
-    语义分割任务 (LightningModule)。
-
-    它继承自 BaseTask，并添加了特定于语义分割的组件：
-    1. 一个 `head` (分割头)。
-    2. 修改了 `forward` 逻辑，以连接 backbone 和 head。
-    3. 修改了 `predict_step` 以输出最终的 argmax 预测。
-    4. 追踪最佳 mIoU 并打印详细的每类指标。
+    语义分割任务
+    
+    继承自 BaseTask，添加了语义分割特定的组件：
+    - backbone + head 网络结构
+    - 最佳 mIoU 追踪
+    - 详细的每类指标打印
+    
+    Attributes
+    ----------
+    backbone : nn.Module
+        特征提取骨干网络
+    head : nn.Module
+        分割头
+    best_miou : float
+        最佳 mIoU 值
+    best_miou_epoch : int
+        最佳 mIoU 对应的轮次
     """
     
-    def __init__(self,
-                 backbone: nn.Module = None,
-                 head: nn.Module = None,
-                 model_config: Dict[str, Any] = None,
-                 **kwargs): # 接收来自 BaseTask 的所有参数 (learning_rate, loss_configs, etc.)
+    def __init__(
+        self,
+        backbone: Optional[nn.Module] = None,
+        head: Optional[nn.Module] = None,
+        model_config: Optional[Dict[str, Any]] = None,
+        **kwargs
+    ) -> None:
         """
-        Args:
-            backbone (nn.Module): 已经实例化的骨干网络 (例如 PT-v2m5)。
-            head (nn.Module): 已经实例化的分割头 (例如 SegmentationHead)。
-            model_config (Dict): 模型配置字典，用于从配置实例化 backbone 和 head。
-                                 如果提供了 model_config，则忽略 backbone 和 head 参数。
-                                 格式:
-                                 {
-                                     'backbone': {'class_path': '...', 'init_args': {...}},
-                                     'head': {'class_path': '...', 'init_args': {...}}
-                                 }
-            **kwargs: 传递给 BaseTask 的参数。
+        初始化语义分割任务
+        
+        参数
+        ----
+        backbone : nn.Module, optional
+            已实例化的骨干网络
+        head : nn.Module, optional
+            已实例化的分割头
+        model_config : dict, optional
+            模型配置字典，用于从配置实例化 backbone 和 head。
+            如果提供，则忽略 backbone 和 head 参数。
+            
+            格式::
+            
+                {
+                    'backbone': {'class_path': '...', 'init_args': {...}},
+                    'head': {'class_path': '...', 'init_args': {...}}
+                }
+                
+        **kwargs
+            传递给 BaseTask 的参数
         """
         super().__init__(**kwargs)
         
-        # 追踪最佳 mIoU（语义分割特定）
+        # 追踪最佳 mIoU
         self.best_miou = 0.0
         self.best_miou_epoch = -1
         
@@ -72,11 +155,11 @@ class SemanticSegmentationTask(BaseTask):
             head_cfg = model_config.get('head')
             
             if backbone_cfg:
-                backbone_cls = self._import_class(backbone_cfg['class_path'])
+                backbone_cls = import_class(backbone_cfg['class_path'])
                 self.backbone = backbone_cls(**backbone_cfg.get('init_args', {}))
             
             if head_cfg:
-                head_cls = self._import_class(head_cfg['class_path'])
+                head_cls = import_class(head_cfg['class_path'])
                 self.head = head_cls(**head_cfg.get('init_args', {}))
                 
         else:
@@ -213,17 +296,17 @@ class SemanticSegmentationTask(BaseTask):
             
         return results
     
-    def _print_validation_metrics(self, print_metrics: Dict[str, Any]):
+    def _print_validation_metrics(self, print_metrics: Dict[str, Any]) -> None:
         """
-        打印语义分割的详细验证指标，包括每类的 IoU、Precision、Recall、F1
+        打印语义分割的详细验证指标
         
-        Args:
-            print_metrics: 包含所有计算出的指标的字典
+        参数
+        ----
+        print_metrics : dict
+            计算出的指标字典
         """
-        # 检查是否有 mIoU 信息
         miou_key = 'mean_iou'
         if miou_key not in print_metrics:
-            # 回退到基类的简单打印
             super()._print_validation_metrics(print_metrics)
             return
         
@@ -235,16 +318,15 @@ class SemanticSegmentationTask(BaseTask):
                 self.best_miou = current_miou
                 self.best_miou_epoch = self.current_epoch
             
-            # 获取其他指标
             overall_acc = print_metrics.get('overall_accuracy', None)
             
-            # 准备每类指标
+            # 获取每类指标
             per_class_iou = print_metrics.get('iou_per_class', print_metrics.get('per_class_iou', None))
             per_class_precision = print_metrics.get('precision_per_class', print_metrics.get('per_class_precision', None))
             per_class_recall = print_metrics.get('recall_per_class', print_metrics.get('per_class_recall', None))
             per_class_f1 = print_metrics.get('f1_per_class', print_metrics.get('per_class_f1', None))
             
-            # 如果没有直接提供每类指标，尝试从 MeanIoU metric 对象中获取 (兼容旧代码)
+            # 兼容旧代码：从 metric 对象获取
             if per_class_iou is None and 'mean_iou' in self.val_metrics:
                 metric = self.val_metrics['mean_iou']
                 if hasattr(metric, 'confusion_matrix'):
@@ -256,42 +338,46 @@ class SemanticSegmentationTask(BaseTask):
                     per_class_recall = intersection / (confmat.sum(1) + 1e-10)
                     per_class_f1 = 2 * per_class_precision * per_class_recall / (per_class_precision + per_class_recall + 1e-10)
 
-            # 输出标题和总体指标 (epoch 从 1 开始显示)
+            # 打印标题
             display_epoch = self.current_epoch + 1
-            print(f"\n{Colors.BOLD}{Colors.SUCCESS}{'='*100}{Colors.RESET}")
-            print(f"{Colors.BOLD}Validation Epoch {display_epoch} - Metrics{Colors.RESET}")
-            print(f"{Colors.BOLD}{Colors.SUCCESS}{'='*100}{Colors.RESET}")
-            if overall_acc is not None:
-                print(f"Overall Accuracy: {Colors.SUCCESS}{overall_acc:.4f}{Colors.RESET} ({overall_acc*100:.2f}%)")
-            print(f"Mean IoU (current): {Colors.SUCCESS}{current_miou:.4f}{Colors.RESET}")
-            print(f"Mean IoU (best)   : {Colors.SUCCESS}{self.best_miou:.4f}{Colors.RESET} (Epoch {self.best_miou_epoch + 1})")
-            if current_miou > self.best_miou - 1e-6:  # 当前是最佳
-                print(f"{Colors.SUCCESS}* New best mIoU achieved!{Colors.RESET}")
-            print(f"{Colors.BOLD}{Colors.SUCCESS}{'='*100}{Colors.RESET}")
+            print()
+            print("=" * 100)
+            print(f"Validation Epoch {display_epoch} - Metrics")
+            print("=" * 100)
             
-            # 输出每个类别的详细指标
+            if overall_acc is not None:
+                print(f"Overall Accuracy: {overall_acc:.4f} ({overall_acc*100:.2f}%)")
+            print(f"Mean IoU (current): {current_miou:.4f}")
+            print(f"Mean IoU (best)   : {self.best_miou:.4f} (Epoch {self.best_miou_epoch + 1})")
+            if current_miou > self.best_miou - 1e-6:
+                print("* New best mIoU achieved!")
+            print("=" * 100)
+            
+            # 打印每类指标
             if per_class_iou is not None:
                 self._print_per_class_metrics(
                     per_class_iou, per_class_precision, per_class_recall, per_class_f1,
                     print_metrics, current_miou
                 )
-            print(f"{Colors.BOLD}{Colors.SUCCESS}{'='*100}{Colors.RESET}\n")
+            print("=" * 100)
+            print()
+            
         except Exception as e:
-            log_warning(f"Could not print detailed metrics: {e}")
+            self._task_logger.warning(f"无法打印详细指标: {e}")
             import traceback
             traceback.print_exc()
     
-    def _print_test_metrics(self, print_metrics: Dict[str, Any]):
+    def _print_test_metrics(self, print_metrics: Dict[str, Any]) -> None:
         """
         打印语义分割的详细测试指标
         
-        Args:
-            print_metrics: 包含所有计算出的指标的字典
+        参数
+        ----
+        print_metrics : dict
+            计算出的指标字典
         """
-        # 检查是否有 mIoU 信息
         miou_key = 'mean_iou'
         if miou_key not in print_metrics:
-            # 回退到基类的简单打印
             super()._print_test_metrics(print_metrics)
             return
         
@@ -299,7 +385,7 @@ class SemanticSegmentationTask(BaseTask):
             current_miou = float(print_metrics[miou_key])
             overall_acc = print_metrics.get('overall_accuracy', None)
             
-            # 准备每类指标
+            # 获取每类指标
             per_class_iou = print_metrics.get('iou_per_class', print_metrics.get('per_class_iou', None))
             per_class_precision = print_metrics.get('precision_per_class', print_metrics.get('per_class_precision', None))
             per_class_recall = print_metrics.get('recall_per_class', print_metrics.get('per_class_recall', None))
@@ -317,22 +403,25 @@ class SemanticSegmentationTask(BaseTask):
                     per_class_recall = intersection / (confmat.sum(1) + 1e-10)
                     per_class_f1 = 2 * per_class_precision * per_class_recall / (per_class_precision + per_class_recall + 1e-10)
 
-            print(f"\n{Colors.BOLD}{Colors.CYAN}{'='*100}{Colors.RESET}")
-            print(f"{Colors.BOLD}Test Results - Metrics{Colors.RESET}")
-            print(f"{Colors.BOLD}{Colors.CYAN}{'='*100}{Colors.RESET}")
+            print()
+            print("=" * 100)
+            print("Test Results - Metrics")
+            print("=" * 100)
             if overall_acc is not None:
-                print(f"Overall Accuracy: {Colors.SUCCESS}{overall_acc:.4f}{Colors.RESET} ({overall_acc*100:.2f}%)")
-            print(f"Mean IoU: {Colors.SUCCESS}{current_miou:.4f}{Colors.RESET}")
-            print(f"{Colors.BOLD}{Colors.CYAN}{'='*100}{Colors.RESET}")
+                print(f"Overall Accuracy: {overall_acc:.4f} ({overall_acc*100:.2f}%)")
+            print(f"Mean IoU: {current_miou:.4f}")
+            print("=" * 100)
             
             if per_class_iou is not None:
                 self._print_per_class_metrics(
                     per_class_iou, per_class_precision, per_class_recall, per_class_f1,
                     print_metrics, current_miou
                 )
-            print(f"{Colors.BOLD}{Colors.CYAN}{'='*100}{Colors.RESET}\n")
+            print("=" * 100)
+            print()
+            
         except Exception as e:
-            log_warning(f"Could not print detailed test metrics: {e}")
+            self._task_logger.warning(f"无法打印详细测试指标: {e}")
             import traceback
             traceback.print_exc()
     

@@ -27,7 +27,7 @@ class Block(nn.Module):
         norm_layer=PointBatchNorm,
     ):
         super(Block, self).__init__()
-        self.attn = GroupedVectorAttention(
+        self.attn = DynamicGatedAttention(
             embed_channels=embed_channels,
             groups=groups,
             qkv_bias=qkv_bias,

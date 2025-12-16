@@ -218,50 +218,57 @@ class BinPklDataModule(DataModuleBase):
         
         return info
     
-    def print_info(self):
-        """打印所有已初始化数据集的信息"""
-        from ..utils.logger import print_header, print_config, Colors, log_info
+    def print_info(self) -> None:
+        """
+        打印所有已初始化数据集的信息
         
-        print_header("BinPklDataModule 信息", "📊")
+        输出包括数据路径、数据集配置、循环配置和数据集统计信息。
+        """
+        from ..utils.logger import (
+            print_header,
+            print_section,
+            log_info,
+            log_debug,
+        )
         
-        print_config({
-            '训练数据': self.train_data or 'N/A',
-            '验证数据': self.val_data or 'N/A',
-            '测试数据': self.test_data or 'N/A',
-            '预测数据': self.predict_data or 'N/A',
-        }, "数据路径")
+        print_header("BinPklDataModule 信息")
         
-        print_config({
-            '数据集类型': 'BinPklDataset',
-            '属性字段': ', '.join(self.assets),
-            '忽略标签': self.ignore_label,
-            '采样模式': self.mode,
-            '最大轮次': self.max_loops or '自动',
-        }, "数据集配置")
+        # 数据路径
+        print_section("数据路径")
+        log_info(f"训练数据: {self.train_data or 'N/A'}")
+        log_info(f"验证数据: {self.val_data or 'N/A'}")
+        log_info(f"测试数据: {self.test_data or 'N/A'}")
+        log_info(f"预测数据: {self.predict_data or 'N/A'}")
         
-        print_config({
-            '训练循环': self.train_loop,
-            '验证循环': self.val_loop,
-            '测试循环': self.test_loop,
-            '预测循环': self.predict_loop,
-        }, "循环配置", "🔄")
+        # 数据集配置
+        print_section("数据集配置")
+        log_info(f"数据集类型: BinPklDataset")
+        log_info(f"属性字段: {', '.join(self.assets)}")
+        log_info(f"忽略标签: {self.ignore_label}")
+        log_info(f"采样模式: {self.mode}")
+        log_info(f"最大轮次: {self.max_loops or '自动'}")
+        
+        # 循环配置
+        print_section("循环配置")
+        log_info(f"训练循环: {self.train_loop}")
+        log_info(f"验证循环: {self.val_loop}")
+        log_info(f"测试循环: {self.test_loop}")
+        log_info(f"预测循环: {self.predict_loop}")
         
         if self.class_mapping:
-            print(f"\n  {Colors.DIM}├─{Colors.RESET} 类别映射: {Colors.CYAN}{self.class_mapping}{Colors.RESET}")
+            log_info(f"类别映射: {self.class_mapping}")
         if self.class_names:
-            print(f"  {Colors.DIM}└─{Colors.RESET} 类别名称: {Colors.GREEN}{', '.join(self.class_names)}{Colors.RESET}")
+            log_info(f"类别名称: {', '.join(self.class_names)}")
         
-        print_config({
-            '动态批次': '是' if self.use_dynamic_batch else '否',
-            '批次大小/最大点数': self.max_points if self.use_dynamic_batch else self.batch_size,
-            '加权采样': '是' if self.use_weighted_sampler else '否',
-            '工作进程': self.num_workers,
-        }, "加载配置", "📦")
+        # 加载配置
+        print_section("加载配置")
+        log_info(f"动态批次: {'是' if self.use_dynamic_batch else '否'}")
+        log_info(f"批次大小/最大点数: {self.max_points if self.use_dynamic_batch else self.batch_size}")
+        log_info(f"加权采样: {'是' if self.use_weighted_sampler else '否'}")
+        log_info(f"工作进程: {self.num_workers}")
         
-        print(f"\n{Colors.BOLD}{Colors.BLUE}{'─' * 50}{Colors.RESET}")
-        print(f"{Colors.BOLD}{Colors.BLUE}  📈 数据集统计{Colors.RESET}")
-        print(f"{Colors.BOLD}{Colors.BLUE}{'─' * 50}{Colors.RESET}")
-        
+        # 数据集统计
+        print_section("数据集统计")
         for split in ['train', 'val', 'test', 'predict']:
             try:
                 info = super().get_dataset_info(split)
@@ -269,12 +276,9 @@ class BinPklDataModule(DataModuleBase):
                 samples = info.get('num_samples', 'N/A')
                 total = info['total_length']
                 mode = dataset.mode if dataset and hasattr(dataset, 'mode') else 'N/A'
-                print(f"  {Colors.GREEN}{split.upper():8}{Colors.RESET}: "
-                      f"{Colors.YELLOW}{samples}{Colors.RESET} 样本, "
-                      f"总长度 {Colors.YELLOW}{total}{Colors.RESET}, "
-                      f"模式 {Colors.CYAN}{mode}{Colors.RESET}")
+                log_info(f"{split.upper():8}: {samples} 样本, 总长度 {total}, 模式 {mode}")
             except ValueError:
-                print(f"  {Colors.DIM}{split.upper():8}: 未初始化{Colors.RESET}")
+                log_debug(f"{split.upper():8}: 未初始化")
     
     def get_sample_num_points(self, split: str = 'train') -> List[int]:
         """

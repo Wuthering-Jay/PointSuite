@@ -1,5 +1,25 @@
 """
-3D ç¹äºæ°æ®å¢å¼ºåæ¢æ¨¡å
+3D 点云数据增强变换模块
+
+本模块提供丰富的点云数据增强变换操作，包括:
+- 通用操作: Compose, Collect, ToTensor, Update
+- 坐标变换: NormalizeCoord, CenterShift, CentroidShift, RandomShift
+- 随机增强: RandomRotate, RandomFlip, RandomScale, RandomJitter, RandomDropout
+- 采样操作: GridSample, FarthestPointSample, RandomSample
+
+使用示例:
+    >>> from pointsuite.data.transforms import Compose, RandomRotate, ToTensor
+    >>> transforms = Compose([
+    ...     RandomRotate(angle=[-1, 1], axis='z'),
+    ...     ToTensor(),
+    ... ])
+    >>> data = transforms(data_dict)
+
+继承开发指南:
+    所有变换类需要实现 __call__(self, data_dict) 方法:
+    - 输入: data_dict (Dict) - 包含点云数据的字典
+    - 输出: data_dict (Dict) - 变换后的数据字典
+    - 返回 None 表示丢弃该样本
 """
 
 import random
@@ -12,14 +32,86 @@ import numpy as np
 import torch
 import copy
 from collections.abc import Sequence, Mapping
+from typing import List, Dict, Any, Optional
 
 
-# ââââ éç¨æä½ ââââ
-# ç»åå¤ä¸ªåæ¢
+def build_transforms(transform_configs: List[Dict[str, Any]]) -> "Compose":
+    """
+    从配置列表构建变换组合
+    
+    从配置字典列表中动态实例化变换类，并将它们组合成 Compose 对象。
+    
+    参数
+    ----
+    transform_configs : list
+        变换配置列表，每个元素是一个字典，包含:
+        - class_path: 变换类名或完整路径
+        - init_args: 初始化参数 (可选)
+        
+    返回
+    ----
+    Compose
+        包含所有变换的组合对象
+        
+    示例
+    ----
+    >>> configs = [
+    ...     {"class_path": "RandomRotate", "init_args": {"angle": [-1, 1], "axis": "z"}},
+    ...     {"class_path": "ToTensor"}
+    ... ]
+    >>> transforms = build_transforms(configs)
+    """
+    if not transform_configs:
+        return Compose([])
+    
+    transforms = []
+    for cfg in transform_configs:
+        if not isinstance(cfg, dict):
+            continue
+            
+        class_path = cfg.get("class_path", "")
+        init_args = cfg.get("init_args", {})
+        
+        # 尝试从当前模块获取变换类
+        transform_cls = None
+        
+        # 如果是简单类名，尝试从当前模块获取
+        if "." not in class_path:
+            transform_cls = globals().get(class_path)
+            
+        # 如果是完整路径，尝试动态导入
+        if transform_cls is None and "." in class_path:
+            try:
+                module_name, class_name = class_path.rsplit(".", 1)
+                import importlib
+                module = importlib.import_module(module_name)
+                transform_cls = getattr(module, class_name)
+            except (ImportError, AttributeError) as e:
+                print(f"[WARN] 无法导入变换类 {class_path}: {e}")
+                continue
+        
+        if transform_cls is None:
+            print(f"[WARN] 未找到变换类: {class_path}")
+            continue
+            
+        # 实例化变换
+        try:
+            transform = transform_cls(**init_args)
+            transforms.append(transform)
+        except Exception as e:
+            print(f"[WARN] 实例化变换 {class_path} 失败: {e}")
+            continue
+    
+    return Compose(transforms)
+
+
 class Compose:
     def __init__(self, transforms=None):
         if transforms is None:
             transforms = []
+        # 如果传入的是 Compose 对象，提取其变换列表
+        elif isinstance(transforms, Compose):
+            transforms = transforms.transforms
         self.transforms = [t for t in transforms if t is not None]
 
     def __call__(self, data_dict):
@@ -30,11 +122,7 @@ class Compose:
         return data_dict
 
 
-# ç´¢å¼æä½
 def index_operator(data_dict, index, duplicate=False):
-    # å¯¹ "index_valid_keys" ä¸­çé®æ§è¡ç´¢å¼éæ©æä½
-    # å¯å¨éç½®ä¸­éè¿ "Update" åæ¢èªå®ä¹è¿äºé®
-    # å¯¹ data_dict ä¸­çé®è¿è¡ç´¢å¼æä½
     if "index_valid_keys" not in data_dict:
         data_dict["index_valid_keys"] = [
             "coord",
@@ -62,7 +150,6 @@ def index_operator(data_dict, index, duplicate=False):
         return data_dict_
 
 
-# æ¶éæå® key çæ°æ®ï¼æ¯æ offset åç¹å¾æ¼æ¥
 class Collect(object):
     def __init__(self, keys, offset_key=None, feat_keys=None):
         """
@@ -84,13 +171,11 @@ class Collect(object):
         if isinstance(self.keys, str):
             self.keys = [self.keys]
         for key in self.keys:
-            # 直接传递数据（可能是 numpy 或 tensor）
             data[key] = data_dict[key]
         for key, value in self.offset_key.items():
-            # offset 创建为 Tensor
             data[key] = torch.tensor([data_dict[value].shape[0]])
             
-        # 🔥 兼容 list 类型的 feat_keys (自动转换为 {'feat': list})
+        # 注意: 关键修改
         feat_keys = self.feat_keys
         if isinstance(feat_keys, list):
             feat_keys = {'feat': feat_keys}
@@ -101,7 +186,6 @@ class Collect(object):
             # data[name] = torch.cat([data_dict[key].float() for key in keys], dim=1)
             tensors = []
             for key in keys:
-                # åè½¬æ¢ä¸º Tensorï¼å¦æè¿ä¸æ¯ï¼
                 if isinstance(data_dict[key], np.ndarray):
                     tensor = torch.from_numpy(data_dict[key]).float()
                 else:
@@ -114,7 +198,6 @@ class Collect(object):
         return data
     
 
-# æ´æ°æå®çé®
 class Update(object):
     def __init__(self, keys_dict=None):
         if keys_dict is None:
@@ -127,7 +210,6 @@ class Update(object):
         return data_dict
     
      
-# å°æ°æ®è½¬æ¢ä¸ºå¼ é
 class ToTensor(object):
     def __call__(self, data):
         if isinstance(data, torch.Tensor):
@@ -155,8 +237,6 @@ class ToTensor(object):
             raise TypeError(f"type {type(data)} cannot be converted to tensor.")
         
 
-# ââââ åæ åæ¢ ââââ
-# åæ æ ååï¼åå»è´¨å¿å¹¶ç¼©æ¾å°åä½ç
 class NormalizeCoord(object):
     def __call__(self, data_dict):
         if "coord" in data_dict.keys():
@@ -168,7 +248,6 @@ class NormalizeCoord(object):
         return data_dict
     
 
-# åå»åå¼é¤ä»¥æ åå·®ï¼æ ååï¼
 class StandardNormalize(object):
     def __init__(self, apply_z=True):
         self.apply_z = apply_z
@@ -180,13 +259,11 @@ class StandardNormalize(object):
             if not self.apply_z:
                 mean[2] = 0
                 std[2] = 1
-            # é¿åé¤ä»¥0
             std[std == 0] = 1
             data_dict["coord"] = (data_dict["coord"] - mean) / std
         return data_dict
 
 
-# åå»æå°å¼é¤ä»¥æå¤§æå°å¼ä¹å·®ï¼MinMaxå½ä¸åï¼
 class MinMaxNormalize(object):
     def __init__(self, apply_z=True):
         self.apply_z = apply_z
@@ -198,14 +275,12 @@ class MinMaxNormalize(object):
             if not self.apply_z:
                 min_vals[2] = 0
                 max_vals[2] = 1
-            # è®¡ç®èå´ï¼é¿åé¤ä»¥0
             ranges = max_vals - min_vals
             ranges[ranges == 0] = 1
             data_dict["coord"] = (data_dict["coord"] - min_vals) / ranges
         return data_dict
 
 
-# åæ åç§»ï¼æå°å¼ï¼
 class PositiveShift(object):
     def __call__(self, data_dict):
         if "coord" in data_dict.keys():
@@ -214,7 +289,6 @@ class PositiveShift(object):
         return data_dict
 
 
-# åæ åç§»ï¼ä¸­å¿ï¼
 class CenterShift(object):
     def __init__(self, apply_z=True):
         self.apply_z = apply_z
@@ -231,7 +305,6 @@ class CenterShift(object):
         return data_dict
     
 
-# åæ åç§»ï¼è´¨å¿ï¼
 class CentroidShift(object):
     def __init__(self, apply_z=True):
         self.apply_z = apply_z
@@ -245,7 +318,6 @@ class CentroidShift(object):
         return data_dict
 
 
-# éæºåç§»
 class RandomShift(object):
     def __init__(self, shift=((-0.2, 0.2), (-0.2, 0.2), (0, 0))):
         self.shift = shift
@@ -259,7 +331,6 @@ class RandomShift(object):
         return data_dict
 
 
-# éæºä¸¢å¼
 class RandomDropout(object):
     def __init__(self, dropout_ratio=0.2, p=0.5):
         """
@@ -282,7 +353,6 @@ class RandomDropout(object):
         return data_dict
 
 
-# éæºæè½¬
 class RandomRotate(object):
     def __init__(self, angle=None, center=None, axis="z", always_apply=False, p=0.5):
         self.angle = [-1, 1] if angle is None else angle
@@ -319,7 +389,6 @@ class RandomRotate(object):
         return data_dict
 
 
-# éæºæè½¬å°ç¹å®è§åº¦
 class RandomRotateTargetAngle(object):
     def __init__(
         self, angle=(1 / 2, 1, 3 / 2), center=None, axis="z", always_apply=False, p=0.75
@@ -358,7 +427,6 @@ class RandomRotateTargetAngle(object):
         return data_dict
 
 
-# éæºç¼©æ¾
 class RandomScale(object):
     def __init__(self, scale=None, anisotropic=False):
         self.scale = scale if scale is not None else [0.95, 1.05]
@@ -373,7 +441,6 @@ class RandomScale(object):
         return data_dict
 
 
-# éæºç¿»è½¬
 class RandomFlip(object):
     def __init__(self, p=0.5):
         self.p = p
@@ -392,7 +459,6 @@ class RandomFlip(object):
         return data_dict
 
 
-# éæºæå¨
 class RandomJitter(object):
     def __init__(self, sigma=0.01, clip=0.05):
         assert clip > 0
@@ -410,7 +476,6 @@ class RandomJitter(object):
         return data_dict
 
 
-# é«æ¯æå¨
 class ClipGaussianJitter(object):
     def __init__(self, scalar=0.02, store_jitter=False):
         self.scalar = scalar
@@ -431,7 +496,6 @@ class ClipGaussianJitter(object):
         return data_dict
     
 
-# é¡ºåºæä¹±
 class ShufflePoint(object):
     def __call__(self, data_dict):
         assert "coord" in data_dict.keys()
@@ -441,8 +505,6 @@ class ShufflePoint(object):
         return data_dict
 
 
-# ââââ å¼ºåº¦åæ¢ ââââ
-# Intensity èªå¨æ£æµå¹¶å½ä¸å
 class AutoNormalizeIntensity(object):
     def __init__(self, target_range=(0, 1)):
         """
@@ -463,31 +525,24 @@ class AutoNormalizeIntensity(object):
         if "intensity" in data_dict.keys():
             intensity = data_dict["intensity"].astype(np.float32)
             
-            # æ£æµå½åèå´
             i_min = intensity.min()
             i_max = intensity.max()
             
-            # èªå¨æ£æµä½æ°å¹¶å½ä¸å
             if i_max <= 1.0:
-                # å·²ç»å½ä¸åï¼å¯è½éè¦è°æ´èå´
                 if self.target_range != (0, 1):
-                    # ä» [0, 1] æ å°å° target_range
                     target_min, target_max = self.target_range
                     intensity = intensity * (target_max - target_min) + target_min
             elif i_max <= 255:
-                # 8 ä½
                 intensity = intensity / 255.0
                 if self.target_range != (0, 1):
                     target_min, target_max = self.target_range
                     intensity = intensity * (target_max - target_min) + target_min
             elif i_max <= 65535:
-                # 16 ä½
                 intensity = intensity / 65535.0
                 if self.target_range != (0, 1):
                     target_min, target_max = self.target_range
                     intensity = intensity * (target_max - target_min) + target_min
             else:
-                # æªç¥èå´ï¼ä½¿ç¨ min-max å½ä¸å
                 if i_max > i_min:
                     intensity = (intensity - i_min) / (i_max - i_min)
                     if self.target_range != (0, 1):
@@ -498,7 +553,6 @@ class AutoNormalizeIntensity(object):
         return data_dict
 
 
-# Intensity å½ä¸åï¼æå®ä½æ°ï¼
 class NormalizeIntensity(object):
     def __init__(self, max_value=65535.0):
         """
@@ -515,7 +569,6 @@ class NormalizeIntensity(object):
         return data_dict
 
 
-# Intensity éæºç¼©æ¾
 class RandomIntensityScale(object):
     def __init__(self, scale=(0.8, 1.2), p=0.95):
         """
@@ -537,7 +590,6 @@ class RandomIntensityScale(object):
         return data_dict
 
 
-# Intensity éæºåç§»
 class RandomIntensityShift(object):
     def __init__(self, shift=(-0.1, 0.1), p=0.95):
         """
@@ -568,7 +620,6 @@ class RandomIntensityShift(object):
         return data_dict
 
 
-# Intensity éæºåªå£°
 class RandomIntensityNoise(object):
     def __init__(self, sigma=0.01, p=0.5):
         """
@@ -599,7 +650,6 @@ class RandomIntensityNoise(object):
         return data_dict
 
 
-# Intensity éæºä¸¢å¼ï¼ç½®ä¸º0ï¼
 class RandomIntensityDrop(object):
     def __init__(self, drop_ratio=0.1, p=0.2):
         """
@@ -620,7 +670,6 @@ class RandomIntensityDrop(object):
         return data_dict
 
 
-# Intensity Gamma åæ¢
 class RandomIntensityGamma(object):
     def __init__(self, gamma_range=(0.8, 1.2), p=0.5):
         """
@@ -653,7 +702,6 @@ class RandomIntensityGamma(object):
         return data_dict
 
 
-# Intensity æ ååï¼ååå¼é¤æ¹å·®ï¼
 class StandardNormalizeIntensity(object):
     def __init__(self, mean=None, std=None):
         """
@@ -682,7 +730,6 @@ class StandardNormalizeIntensity(object):
         return data_dict
 
 
-# Intensity MinMax å½ä¸å
 class MinMaxNormalizeIntensity(object):
     def __init__(self, min_val=None, max_val=None, target_range=(0, 1)):
         """
@@ -723,8 +770,6 @@ class MinMaxNormalizeIntensity(object):
         return data_dict
 
     
-# ââââ é¢è²åæ¢ ââââ
-# é¢è²èªå¨æ£æµå¹¶å½ä¸å
 class AutoNormalizeColor(object):
     def __init__(self, target_range=(0, 255)):
         """
@@ -747,26 +792,19 @@ class AutoNormalizeColor(object):
         if "color" in data_dict.keys():
             color = data_dict["color"].astype(np.float32)
             
-            # æ£æµå½åèå´ï¼ä½¿ç¨ææééçæå¤§å¼ï¼
             c_min = color.min()
             c_max = color.max()
             
             target_min, target_max = self.target_range
             
-            # èªå¨æ£æµä½æ°å¹¶å½ä¸å
             if c_max <= 1.0:
-                # å·²ç»å½ä¸åå° [0, 1]ï¼æ å°å° target_range
                 color = color * (target_max - target_min) + target_min
             elif c_max <= 255:
-                # 8 ä½ï¼å·²å¨ [0, 255] èå´
                 if self.target_range != (0, 255):
-                    # éè¦æ å°å°å¶ä»èå´
                     color = (color / 255.0) * (target_max - target_min) + target_min
             elif c_max <= 65535:
-                # 16 ä½ï¼è½¬æ¢å°ç®æ èå´
                 color = (color / 65535.0) * (target_max - target_min) + target_min
             else:
-                # æªç¥èå´ï¼ä½¿ç¨ min-max å½ä¸å
                 if c_max > c_min:
                     color = (color - c_min) / (c_max - c_min)
                     color = color * (target_max - target_min) + target_min
@@ -775,7 +813,6 @@ class AutoNormalizeColor(object):
         return data_dict
 
 
-# é¢è²å½ä¸åï¼æå®ä½æ°ï¼
 class NormalizeColor(object):
     def __init__(self, source_bits=16, target_range=(0, 255)):
         """
@@ -793,10 +830,8 @@ class NormalizeColor(object):
         if "color" in data_dict.keys():
             color = data_dict["color"].astype(np.float32)
             
-            # å½ä¸åå° [0, 1]
             color = color / self.source_max
             
-            # æ å°å°ç®æ èå´
             target_min, target_max = self.target_range
             color = color * (target_max - target_min) + target_min
             
@@ -804,7 +839,6 @@ class NormalizeColor(object):
         return data_dict
 
 
-# é¢è²å¯¹æ¯åº¦å¢å¼º
 class ChromaticAutoContrast(object):
     def __init__(self, p=0.2, blend_factor=None):
         self.p = p
@@ -825,7 +859,6 @@ class ChromaticAutoContrast(object):
         return data_dict
 
 
-# é¢è²éæºå¹³ç§»
 class ChromaticTranslation(object):
     def __init__(self, p=0.95, ratio=0.05):
         self.p = p
@@ -838,7 +871,6 @@ class ChromaticTranslation(object):
         return data_dict
 
 
-# é¢è²éæºæå¨
 class ChromaticJitter(object):
     def __init__(self, p=0.95, std=0.005):
         self.p = p
@@ -854,7 +886,6 @@ class ChromaticJitter(object):
         return data_dict
 
 
-# éæºé¢è²ç°åº¦å
 class RandomColorGrayScale(object):
     def __init__(self, p):
         self.p = p
@@ -886,7 +917,6 @@ class RandomColorGrayScale(object):
         return data_dict
 
 
-# éæºé¢è²æå¨
 class RandomColorJitter(object):
     """
     Random Color Jitter for 3D point cloud (refer torchvision)
@@ -1070,7 +1100,6 @@ class RandomColorJitter(object):
         return data_dict
 
 
-# éæºé¢è²é¥±ååº¦
 class HueSaturationTranslation(object):
     @staticmethod
     def rgb_to_hsv(rgb):
@@ -1138,7 +1167,6 @@ class HueSaturationTranslation(object):
         return data_dict
 
 
-# éæºé¢è²ä¸¢å¼
 class RandomColorDrop(object):
     def __init__(self, p=0.2, color_augment=0.0):
         self.p = p
@@ -1155,7 +1183,6 @@ class RandomColorDrop(object):
         )
 
 
-# å¼¹æ§å¤±çï¼æ¨¡æèªç¶åå½¢
 class ElasticDistortion(object):
     def __init__(self, distortion_params=None):
         self.distortion_params = (
@@ -1216,8 +1243,6 @@ class ElasticDistortion(object):
         return data_dict
 
 
-# ââââ å½ä¸åé«ç¨ï¼h_normï¼åæ¢ ââââ
-# å½ä¸åé«ç¨èªå¨å½ä¸åï¼å¯éè£åªï¼
 class AutoNormalizeHNorm(object):
     def __init__(self, clip_range=None):
         """
@@ -1246,7 +1271,6 @@ class AutoNormalizeHNorm(object):
         if "h_norm" in data_dict.keys():
             h_norm = data_dict["h_norm"].astype(np.float32)
             
-            # å¯éè£åªå¼å¸¸å¼
             if self.clip_range is not None:
                 if self.clip_range[0] is not None:
                     h_norm = np.maximum(h_norm, self.clip_range[0])
@@ -1257,7 +1281,6 @@ class AutoNormalizeHNorm(object):
         return data_dict
 
 
-# å½ä¸åé«ç¨æ åå
 class StandardNormalizeHNorm(object):
     def __init__(self, mean=None, std=None):
         """
@@ -1279,7 +1302,6 @@ class StandardNormalizeHNorm(object):
             mean = self.mean if self.mean is not None else h_norm.mean()
             std = self.std if self.std is not None else h_norm.std()
             
-            # é¿åé¤é¶
             if std == 0:
                 std = 1.0
             
@@ -1287,7 +1309,6 @@ class StandardNormalizeHNorm(object):
         return data_dict
 
 
-# å½ä¸åé«ç¨éæºç¼©æ¾
 class RandomHNormScale(object):
     def __init__(self, scale=(0.9, 1.1), p=0.5):
         """
@@ -1311,7 +1332,6 @@ class RandomHNormScale(object):
         return data_dict
 
 
-# å½ä¸åé«ç¨éæºåªå£°
 class RandomHNormNoise(object):
     def __init__(self, sigma=0.1, p=0.5):
         """
@@ -1335,7 +1355,6 @@ class RandomHNormNoise(object):
         return data_dict
 
 
-# å½ä¸åé«ç¨å¯¹æ°åæ¢
 class LogTransformHNorm(object):
     def __init__(self, epsilon=1e-6):
         """
@@ -1352,14 +1371,11 @@ class LogTransformHNorm(object):
     def __call__(self, data_dict):
         if "h_norm" in data_dict.keys():
             h_norm = data_dict["h_norm"].astype(np.float32)
-            # ç¡®ä¿éè´
             h_norm = np.maximum(h_norm, 0)
-            # å¯¹æ°åæ¢
             data_dict["h_norm"] = np.log(h_norm + self.epsilon).astype(np.float32)
         return data_dict
 
 
-# å½ä¸åé«ç¨åæ¡¶ç¼ç 
 class BinHNorm(object):
     def __init__(self, bins=10, range=(0, 20)):
         """
@@ -1378,20 +1394,15 @@ class BinHNorm(object):
         if "h_norm" in data_dict.keys():
             h_norm = data_dict["h_norm"].astype(np.float32)
             
-            # ä½¿ç¨ numpy ç digitize è¿è¡åæ¡¶
             bin_edges = np.linspace(self.range[0], self.range[1], self.bins + 1)
             binned = np.digitize(h_norm, bin_edges) - 1
             
-            # è£åªå° [0, bins-1]
             binned = np.clip(binned, 0, self.bins - 1)
             
-            # è½¬æ¢ä¸º floatï¼å½ä¸åå° [0, 1]ï¼
             data_dict["h_norm"] = (binned / (self.bins - 1)).astype(np.float32)
         return data_dict
 
 
-# ââââ åªç¹æ³¨å¥å¢å¼º ââââ
-# æ·»å æç«¯é«åº¦åªç¹
 class AddExtremeOutliers(object):
     def __init__(self, 
                  num_outliers=None, 
@@ -1458,29 +1469,23 @@ class AddExtremeOutliers(object):
         coord = data_dict["coord"]
         n_points = len(coord)
         
-        # è®¡ç®åªç¹æ°é
         if self.num_outliers is not None:
             n_outliers = self.num_outliers
         else:
             n_outliers = max(1, int(n_points * self.ratio))
         
-        # è·ååå§ç¹äºç XY èå´
         x_min, y_min, z_min = coord.min(axis=0)
         x_max, y_max, z_max = coord.max(axis=0)
         
-        # çæåªç¹åæ 
         outlier_xy = np.random.rand(n_outliers, 2)
         outlier_xy[:, 0] = outlier_xy[:, 0] * (x_max - x_min) + x_min
         outlier_xy[:, 1] = outlier_xy[:, 1] * (y_max - y_min) + y_min
         
-        # æ ¹æ®æ¨¡å¼çæé«åº¦
         if self.height_mode == 'uniform':
-            # åååå¸
             outlier_z = np.random.uniform(
                 self.height_range[0], self.height_range[1], n_outliers
             )
         elif self.height_mode == 'bimodal':
-            # åå³°åå¸ï¼50% é«ç©ºï¼50% ä½ç©º
             n_high = n_outliers // 2
             n_low = n_outliers - n_high
             z_high = np.random.uniform(
@@ -1492,25 +1497,20 @@ class AddExtremeOutliers(object):
             outlier_z = np.concatenate([z_high, z_low])
             np.random.shuffle(outlier_z)
         elif self.height_mode == 'high':
-            # åªå¨é«ç©º
             outlier_z = np.random.uniform(
                 max(self.height_range[0], z_max), self.height_range[1], n_outliers
             )
         elif self.height_mode == 'low':
-            # åªå¨ä½ç©º/å°ä¸
             outlier_z = np.random.uniform(
                 self.height_range[0], min(self.height_range[1], z_min), n_outliers
             )
         else:
             raise ValueError(f"Unknown height_mode: {self.height_mode}")
         
-        # ç»ååªç¹åæ 
         outlier_coord = np.column_stack([outlier_xy, outlier_z]).astype(coord.dtype)
         
-        # æ·»å åªç¹å°åæ 
         data_dict["coord"] = np.vstack([coord, outlier_coord])
         
-        # å¤çå¶ä»å±æ§
         # 1. Intensity
         if "intensity" in data_dict:
             outlier_intensity = np.random.uniform(
@@ -1523,16 +1523,13 @@ class AddExtremeOutliers(object):
         # 2. Color
         if "color" in data_dict:
             if self.color_value == 'random':
-                # éæºé¢è²
                 outlier_color = np.random.uniform(
                     0, 255, (n_outliers, 3)
                 ).astype(data_dict["color"].dtype)
             elif self.color_value == 'inherit':
-                # ä»æè¿ççå®ç¹ç»§æ¿ï¼ä½¿ç¨ç®åçéæºéæ ·ï¼
                 random_indices = np.random.choice(n_points, n_outliers)
                 outlier_color = data_dict["color"][random_indices].copy()
             else:
-                # åºå®é¢è²
                 outlier_color = np.tile(
                     np.array(self.color_value, dtype=data_dict["color"].dtype),
                     (n_outliers, 1)
@@ -1541,8 +1538,6 @@ class AddExtremeOutliers(object):
         
         # 3. h_norm
         if "h_norm" in data_dict:
-            # è®¡ç®åªç¹ç h_norm
-            # ç®åï¼åè®¾å°é¢é«ç¨ä¸ºåå§ç¹äºçæå° Z
             ground_z = z_min
             outlier_h_norm = (outlier_z - ground_z).astype(data_dict["h_norm"].dtype)
             data_dict["h_norm"] = np.concatenate([
@@ -1551,33 +1546,26 @@ class AddExtremeOutliers(object):
         
         # 4. Normal
         if "normal" in data_dict:
-            # åªç¹çæ³åéï¼éæºæ¹åï¼æ¨¡æåªå£°ï¼
             outlier_normal = np.random.randn(n_outliers, 3).astype(
                 data_dict["normal"].dtype
             )
-            # å½ä¸å
             norms = np.linalg.norm(outlier_normal, axis=1, keepdims=True)
             outlier_normal = outlier_normal / (norms + 1e-8)
             data_dict["normal"] = np.vstack([data_dict["normal"], outlier_normal])
         
         # 5. Echo
         if "echo" in data_dict:
-            # åªç¹éå¸¸æ¯åæ¬¡åæ³¢
             outlier_echo = np.ones((n_outliers, 2), dtype=data_dict["echo"].dtype)
-            # è®¾ä¸ºé¦æ¬¡ä¸æ«æ¬¡åæ³¢ï¼åæ¬¡åæ³¢çç¹å¾ï¼
             data_dict["echo"] = np.vstack([data_dict["echo"], outlier_echo])
         
         # 6. Classification
         if "class" in data_dict:
             if self.class_label is None:
-                # ä»æè¿ççå®ç¹ç»§æ¿ï¼éæºéæ ·ï¼
                 random_indices = np.random.choice(n_points, n_outliers)
                 outlier_class = data_dict["class"][random_indices].copy()
             elif self.class_label == 'ignore':
-                # ä½¿ç¨ ignore_labelï¼éå¸¸å¨ dataset ä¸­å®ä¹ï¼
                 outlier_class = np.full(n_outliers, -1, dtype=data_dict["class"].dtype)
             else:
-                # åºå®æ ç­¾
                 outlier_class = np.full(
                     n_outliers, self.class_label, dtype=data_dict["class"].dtype
                 )
@@ -1586,7 +1574,6 @@ class AddExtremeOutliers(object):
         return data_dict
 
 
-# æ·»å å±é¨åªç¹ç°
 class AddLocalNoiseClusters(object):
     def __init__(self,
                  num_clusters=3,
@@ -1642,7 +1629,6 @@ class AddLocalNoiseClusters(object):
         if n_points < 10:
             return data_dict
         
-        # éæºéæ©ç°ä¸­å¿ï¼ä»ç°æç¹ä¸­éæ©ï¼
         cluster_centers = coord[
             np.random.choice(n_points, min(self.num_clusters, n_points), replace=False)
         ]
@@ -1650,23 +1636,18 @@ class AddLocalNoiseClusters(object):
         all_outlier_coords = []
         
         for center in cluster_centers:
-            # æ¯ä¸ªç°çç¹æ°
             n_cluster = np.random.randint(
                 self.points_per_cluster[0], self.points_per_cluster[1] + 1
             )
             
-            # å¨çå½¢åºååçæç¹
-            # ä½¿ç¨çåæ ç³»ï¼åååå¸
             theta = np.random.uniform(0, 2 * np.pi, n_cluster)
             phi = np.random.uniform(0, np.pi, n_cluster)
             r = np.random.uniform(0, self.cluster_radius, n_cluster)
             
-            # è½¬æ¢ä¸ºç¬å¡å°åæ 
             x = center[0] + r * np.sin(phi) * np.cos(theta)
             y = center[1] + r * np.sin(phi) * np.sin(theta)
             z_base = center[2] + r * np.cos(phi)
             
-            # æ·»å é«åº¦åç§»
             z_offset = np.random.uniform(
                 self.height_offset[0], self.height_offset[1], n_cluster
             )
@@ -1681,10 +1662,8 @@ class AddLocalNoiseClusters(object):
         outlier_coord = np.vstack(all_outlier_coords).astype(coord.dtype)
         n_outliers = len(outlier_coord)
         
-        # æ·»å åªç¹å°åæ 
         data_dict["coord"] = np.vstack([coord, outlier_coord])
         
-        # å¤çå¶ä»å±æ§ï¼ä¸ AddExtremeOutliers ç±»ä¼¼ï¼
         if "intensity" in data_dict:
             outlier_intensity = np.random.uniform(
                 self.intensity_range[0], self.intensity_range[1], n_outliers
@@ -1709,7 +1688,6 @@ class AddLocalNoiseClusters(object):
             data_dict["color"] = np.vstack([data_dict["color"], outlier_color])
         
         if "h_norm" in data_dict:
-            # ç®åè®¡ç®ï¼ä½¿ç¨åå§ç¹äºæå° Z ä½ä¸ºå°é¢
             ground_z = coord[:, 2].min()
             outlier_h_norm = (outlier_coord[:, 2] - ground_z).astype(
                 data_dict["h_norm"].dtype
@@ -1745,7 +1723,6 @@ class AddLocalNoiseClusters(object):
         return data_dict
     
 
-# ââââ Grid Sample ââââ
 class GridSample(object):
     def __init__(
         self,
@@ -1771,23 +1748,18 @@ class GridSample(object):
 
     def __call__(self, data_dict):
         assert "coord" in data_dict.keys()
-        # è®¡ç®è§åååæ 
         self.grid_size=self.grid_size
         scaled_coord = data_dict["coord"] / np.array(self.grid_size)
         grid_coord = np.floor(scaled_coord).astype(int)
-        # è®¡ç®æå°ç½æ ¼åæ ï¼å½ä¸å
         min_coord = grid_coord.min(0)
         grid_coord -= min_coord
         scaled_coord -= min_coord
         min_coord = min_coord * np.array(self.grid_size)
-        # è·åè§ååæ åå¸å¼å¹¶æåº
         key = self.hash(grid_coord)
         idx_sort = np.argsort(key)
         key_sort = key[idx_sort]
-        # è®¡ç®ç½æ ¼ç´¢å¼åç¹æ°ç»è®¡
         _, inverse, count = np.unique(key_sort, return_inverse=True, return_counts=True)
         if self.mode == "train":  # train mode
-            # æ ¼ç½ä¸­éæºéæ ·
             idx_select = (
                 np.cumsum(np.insert(count, 0, 0)[0:-1])
                 + np.random.randint(0, count.max(), count.size) % count
@@ -1802,17 +1774,14 @@ class GridSample(object):
                 mask[data_dict["sampled_index"]] = True
                 data_dict["sampled_index"] = np.where(mask[idx_unique])[0]
             data_dict = index_operator(data_dict, idx_unique)
-            # è¥éè¿åéç´¢å¼ return_inverseï¼è®°å½æ¯ä¸ªç¹å¨åå§æ°æ®ä¸­çå½å±
             if self.return_inverse:
                 data_dict["inverse"] = np.zeros_like(inverse)
                 data_dict["inverse"][idx_sort] = inverse
-            # è®°å½ç½æ ¼åæ åæå°åæ 
             if self.return_grid_coord:
                 data_dict["grid_coord"] = grid_coord[idx_unique]
                 data_dict["index_valid_keys"].append("grid_coord")
             if self.return_min_coord:
                 data_dict["min_coord"] = min_coord.reshape([1, 3])
-            # ç¹å¨ç½æ ¼åçä½ç½®åæ³çº¿ä¸çè·ç¦»
             if self.return_displacement:
                 displacement = (
                     scaled_coord - grid_coord - 0.5
@@ -1827,7 +1796,6 @@ class GridSample(object):
 
         elif self.mode == "test":  # test mode
             data_part_list = []
-            # å¾ªç¯éæ ·ï¼é¿åéæ¼
             for i in range(count.max()):
                 idx_select = np.cumsum(np.insert(count, 0, 0)[0:-1]) + i % count
                 idx_part = idx_sort[idx_select]
@@ -1858,7 +1826,6 @@ class GridSample(object):
             raise NotImplementedError
 
     @staticmethod
-    # éç¨äºèå´å·²ç¥ï¼å¯éæ ¼ç½
     def ravel_hash_vec(arr):
         """
         Ravel the coordinates after subtracting the min coordinates.
@@ -1878,7 +1845,6 @@ class GridSample(object):
         return keys
 
     @staticmethod
-    # éç¨äºèå´æªç¥æè¾å¤§ï¼ç¨çæ ¼ç½
     def fnv_hash_vec(arr):
         """
         FNV64-1A

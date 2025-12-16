@@ -20,7 +20,7 @@ run:
   #   - test: 仅测试
   #   - predict: 仅预测
   #   - full: 训练 -> 验证 -> 测试 -> 预测
-  mode: train
+  mode: full
   
   # 随机种子
   seed: 42
@@ -67,9 +67,9 @@ data:
     
     # 动态批处理 (推荐开启以节省显存)
     dynamic_batch:
-      enabled: false
+      enabled: true
       max_points_train: 125000
-      max_points_inference: 200000
+      max_points_inference: 125000
       
     # 训练循环次数 (Epoch 放大倍数)
     loop:
@@ -217,21 +217,33 @@ task:
 # 损失函数配置 (Loss Configuration)
 # ════════════════════════════════════════════════════════════════════════════
 losses:
-  # 1. Cross Entropy Loss
+  # 1. Cross Entropy Loss (接收 logits)
   - name: ce_loss
     class_path: CrossEntropyLoss
     init_args:
       ignore_index: ${data.classes.ignore_label}
     auto_weight: true
     loss_weight: 1.0
+    # loss_source: logits  # 默认值，可以省略
     
-  # 2. Lovasz Loss
+  # 2. Lovasz Loss (接收 logits)
   # - name: lovasz_loss
-  #   class_path: pointsuite.models.losses.LovaszLoss
+  #   class_path: LovaszLoss
   #   init_args:
   #     ignore_index: ${data.classes.ignore_label}
   #     mode: multiclass
   #   loss_weight: 1.0
+  
+  # 3. SACB Loss - 结构感知对比边界损失 (接收 features, 而非 logits)
+  # - name: sacb_loss
+  #   class_path: SACBLoss
+  #   init_args:
+  #     k_neighbors: 16
+  #     ignore_index: ${data.classes.ignore_label}
+  #     push_margin: 0.5
+  #     temperature: 0.1
+  #   loss_weight: 1.0
+  #   loss_source: features  # 关键: 指定使用 backbone 输出的 features 而非 head 输出的 logits
 
 # ════════════════════════════════════════════════════════════════════════════
 # 指标配置 (Metrics Configuration)
