@@ -49,10 +49,10 @@ run:
 data:
   # 数据路径 (必须配置，因为 dales.yaml 中默认为 null)
   paths:
-    train: E:/data/DALES/dales_las/bin_logical/train    # 训练集目录 (包含 .bin/.pkl 文件)
-    val: E:/data/DALES/dales_las/bin_logical/test       # 验证集目录
-    test: E:/data/DALES/dales_las/bin_logical/test      # 测试集目录
-    predict: E:/data/DALES/dales_las/bin_logical/test   # 预测数据目录
+    train: E:/data/DALES/dales_las/bin/train    # 训练集目录 (包含 .bin/.pkl 文件)
+    val: E:/data/DALES/dales_las/bin/test       # 验证集目录
+    test: E:/data/DALES/dales_las/bin/test      # 测试集目录
+    predict: E:/data/DALES/dales_las/bin/test   # 预测数据目录
   
   # 可选覆盖示例:
   # loader:
@@ -146,16 +146,16 @@ losses:
       ignore_index: ${data.classes.ignore_label}
       # weight: 类别权重，用于处理类别不平衡
       # null 时自动从 datamodule.class_weights 获取
-    weight: 1.0                                            # 该损失的权重系数
+    loss_weight: 1.0                                       # 该损失的权重系数
     
   # 可选: Lovasz 损失 (直接优化 IoU/Jaccard 指标)
   # 适合语义分割任务，尤其是类别不平衡场景
-  # - name: lovasz_loss
-  #   class_path: pointsuite.models.losses.LovaszLoss
-  #   init_args:
-  #     ignore_index: ${data.classes.ignore_label}
-  #     mode: multiclass          # 多分类模式 (softmax)
-  #   weight: 1.0
+  - name: lovasz_loss
+    class_path: pointsuite.models.losses.LovaszLoss
+    init_args:
+      ignore_index: ${data.classes.ignore_label}
+      mode: multiclass          # 多分类模式 (softmax)
+    loss_weight: 1.0
   
   # 可选: Dice 损失 (处理类别不平衡)
   # 基于 F1 分数，对小目标更敏感

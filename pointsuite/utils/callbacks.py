@@ -812,6 +812,13 @@ class TextLoggingCallback(Callback):
         total_batches = 0
         if stage == "Train":
             total_batches = trainer.num_training_batches
+            # 如果 PL 返回 inf，尝试手动获取
+            if total_batches == float('inf'):
+                try:
+                    if trainer.train_dataloader:
+                        total_batches = len(trainer.train_dataloader)
+                except:
+                    pass
         elif stage == "Val":
             total_batches = sum(trainer.num_val_batches) if isinstance(trainer.num_val_batches, list) else trainer.num_val_batches
         elif stage == "Test":
@@ -900,7 +907,9 @@ class TextLoggingCallback(Callback):
         metrics_str = ", ".join(metrics_parts) if metrics_parts else ""
 
         # 6. 构建并打印输出
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
         parts = [
+            f"{self.Colors.DIM}[{timestamp}]{self.Colors.RESET}",
             f"{stage_color}[{stage}]{self.Colors.RESET}",
             f"{self.Colors.DIM}{epoch_str}{self.Colors.RESET}" if epoch_str else "",
             f"[{current_batch}/{total_batches}]",

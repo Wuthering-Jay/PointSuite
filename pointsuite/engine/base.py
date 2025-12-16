@@ -329,8 +329,17 @@ class BaseEngine(ABC):
         # ModelCheckpoint
         ckpt_cfg = callback_config.get('model_checkpoint')
         if ckpt_cfg:
+            # 兼容 class_path/init_args 结构
+            if 'init_args' in ckpt_cfg:
+                ckpt_cfg = ckpt_cfg['init_args']
+            
             # 移除 enabled 字段（如果有）
             ckpt_cfg = {k: v for k, v in ckpt_cfg.items() if k != 'enabled'}
+            
+            # 移除 class_path 字段（如果还有）
+            if 'class_path' in ckpt_cfg:
+                ckpt_cfg.pop('class_path')
+                
             callbacks.append(ModelCheckpoint(
                 dirpath=os.path.join(self.config.output_dir, 'checkpoints'),
                 **ckpt_cfg
@@ -350,9 +359,17 @@ class BaseEngine(ABC):
         # EarlyStopping
         es_cfg = callback_config.get('early_stopping')
         if es_cfg:
+            # 兼容 class_path/init_args 结构
+            if 'init_args' in es_cfg:
+                es_cfg = es_cfg['init_args']
+                
             enabled = es_cfg.pop('enabled', True) if isinstance(es_cfg, dict) else True
             if enabled:
                 es_cfg_clean = {k: v for k, v in es_cfg.items() if k != 'enabled'}
+                # 移除 class_path 字段
+                if 'class_path' in es_cfg_clean:
+                    es_cfg_clean.pop('class_path')
+                    
                 callbacks.append(EarlyStopping(**es_cfg_clean))
         
         # TextLoggingCallback (从 trainer.logging 或 callbacks.text_logging)
@@ -541,9 +558,32 @@ class BaseEngine(ABC):
             ).copy()
             
             # 特殊处理: T_max 为 null 时自动设置
-            if scheduler_args.get('T_max') is None and hasattr(self_task.trainer, 'estimated_stepping_batches'):
-                scheduler_args['T_max'] = self_task.trainer.estimated_stepping_batches
-            
+            if scheduler_args.get('T_max') is None:
+                total_steps = None
+                if hasattr(self_task.trainer, 'estimated_stepping_batches'):
+                    total_steps = self_task.trainer.estimated_stepping_batches
+                
+                # 如果 PL 无法估计 (inf)，尝试手动计算
+                if total_steps is None or total_steps == float('inf'):
+                    try:
+                        # 尝试获取 dataloader 长度
+                        if self_task.trainer.train_dataloader:
+                            num_batches = len(self_task.trainer.train_dataloader)
+                            max_epochs = self_task.trainer.max_epochs
+                            accumulate = self_task.trainer.accumulate_grad_batches
+                            total_steps = (num_batches // accumulate) * max_epochs
+                    except Exception:
+                        pass
+                
+                if total_steps is not None and total_steps != float('inf'):
+                    scheduler_args['T_max'] = int(total_steps)
+                    # print(f"Auto-configured T_max: {scheduler_args['T_max']}")
+                else:
+                    # 最后的兜底：如果还是无法确定，给一个默认值防止报错
+                    # 假设 10000 步，或者抛出警告
+                    scheduler_args['T_max'] = 10000 
+                    print("Warning: Could not estimate total steps for CosineAnnealingLR. Using default T_max=10000.")
+
             scheduler = scheduler_cls(optimizer, **scheduler_args)
             
             return {
@@ -581,7 +621,7 @@ class BaseEngine(ABC):
         
         # 设置日志
         if not self._logger_initialized:
-            setup_logger(self.config.output_dir)
+            setup_logger(self.config.output_dir, log_prefix=self.config.mode)
             self._logger_initialized = True
         
         # 打印配置
@@ -706,11 +746,12 @@ class BaseEngine(ABC):
         根据配置执行完整流程
         
         根据 run.mode 决定执行的流程:
-        - train: 训练 -> 测试 -> 预测
-        - resume: 继续训练 -> 测试 -> 预测
-        - finetune: 微调 -> 测试 -> 预测
-        - test: 测试 -> 预测
+        - train: 训练 -> 验证 -> 测试
+        - resume: 恢复训练 -> 验证 -> 测试
+        - finetune: 加载权重微调 -> 验证 -> 测试
+        - test: 仅测试
         - predict: 仅预测
+        - full: 训练 -> 验证 -> 测试 -> 预测
         
         Returns:
             self (支持链式调用)
@@ -720,19 +761,25 @@ class BaseEngine(ABC):
         mode = self.config.mode
         
         if mode in ['train', 'resume', 'finetune']:
+            # 训练阶段 (包含验证)
             self.train()
-            if self.config.data.get('test_data'):
+            # 训练后测试
+            if self.config.data.get('test_data') or self.config.data.get('paths', {}).get('test'):
                 self.test()
-            if self.config.data.get('predict_data'):
-                self.predict()
                 
         elif mode == 'test':
             self.test()
-            if self.config.data.get('predict_data'):
-                self.predict()
-                
+            
         elif mode == 'predict':
             self.predict()
+            
+        elif mode == 'full':
+            # 全流程
+            self.train()
+            if self.config.data.get('test_data') or self.config.data.get('paths', {}).get('test'):
+                self.test()
+            if self.config.data.get('predict_data') or self.config.data.get('paths', {}).get('predict'):
+                self.predict()
             
         else:
             raise ValueError(f"未知的运行模式: {mode}")
@@ -779,6 +826,15 @@ class BaseEngine(ABC):
             '随机种子': self.config.seed,
             '输出目录': self.config.output_dir,
         }, "运行配置")
+
+        # 记录完整配置
+        print_section("完整配置")
+        try:
+            import yaml
+            print(yaml.dump(self.config.to_dict(), allow_unicode=True, default_flow_style=False, sort_keys=False))
+        except ImportError:
+            log_warning("未安装 PyYAML，无法打印完整配置 YAML")
+            print(self.config.to_dict())
     
     def _print_trainer_info(self) -> None:
         """打印 Trainer 信息"""

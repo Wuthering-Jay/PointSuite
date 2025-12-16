@@ -457,7 +457,7 @@ class DualLogger:
         return ansi_escape.sub('', text)
 
 
-def setup_logger(output_dir: str) -> str:
+def setup_logger(output_dir: str, log_prefix: str = "training_log") -> str:
     """
     设置日志系统
     
@@ -466,13 +466,14 @@ def setup_logger(output_dir: str) -> str:
     
     Args:
         output_dir: 日志输出目录
+        log_prefix: 日志文件名前缀 (默认: "training_log")
         
     Returns:
         日志文件路径
     """
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_filename = f"training_log_{timestamp}.txt"
+    log_filename = f"{log_prefix}_{timestamp}.txt"
     log_filepath = os.path.join(output_dir, log_filename)
     
     logger = DualLogger(log_filepath)

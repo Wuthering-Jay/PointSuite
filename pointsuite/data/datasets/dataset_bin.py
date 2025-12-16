@@ -247,6 +247,7 @@ class BinPklDataset(DatasetBase):
                 continue
             
             # 加载 pkl 元数据（只在初始化时使用，不缓存到实例）
+            # 优化：显式删除大对象
             with open(pkl_path, 'rb') as f:
                 metadata = pickle.load(f)
             
@@ -256,7 +257,10 @@ class BinPklDataset(DatasetBase):
             grid_size = metadata.get('grid_size', None)
             
             # 处理每个 segment
-            for segment_info in metadata['segments']:
+            segments = metadata['segments']
+            del metadata # 立即释放原始 metadata 对象
+            
+            for segment_info in segments:
                 segment_id = segment_info['segment_id']
                 num_points = segment_info['num_points']
                 total_segments += 1

@@ -18,7 +18,7 @@ from .base import BaseEngine
 from ..data import BinPklDataModule
 from ..tasks import SemanticSegmentationTask
 from ..utils.callbacks import SemanticPredictLasWriter, AutoEmptyCacheCallback, TextLoggingCallback
-from ..utils.logger import Colors, print_config, log_info
+from ..utils.logger import Colors, print_config, log_info, log_warning
 
 
 class SemanticSegmentationEngine(BaseEngine):
@@ -227,10 +227,44 @@ class SemanticSegmentationEngine(BaseEngine):
         # 处理损失函数中的类别权重
         if loss_configs and hasattr(self._datamodule, 'train_dataset'):
             for loss_cfg in loss_configs:
-                init_args = loss_cfg.get('init_args', {})
-                # 如果需要类别权重但未指定，从 datamodule 获取
-                if 'weight' not in init_args and hasattr(self._datamodule.train_dataset, 'class_weights'):
-                    init_args['weight'] = self._datamodule.train_dataset.class_weights
+                # 仅对 CrossEntropyLoss 自动注入类别权重
+                # 其他 Loss (如 LovaszLoss, FocalLoss) 可能不支持 weight 参数或使用不同参数名 (如 alpha)
+                class_path = loss_cfg.get('class_path', '').lower()
+                loss_name = loss_cfg.get('name', '').lower()
+                
+                is_ce_loss = 'crossentropyloss' in class_path or 'ce_loss' in loss_name
+                
+                if is_ce_loss:
+                    init_args = loss_cfg.get('init_args', {})
+                    
+                    # 检查是否启用了自动权重计算
+                    # 1. 显式参数 auto_weight=True (推荐)
+                    # 2. 兼容旧逻辑：如果没指定 weight 且 dataset 有权重，则自动注入 (但不推荐)
+                    auto_weight = loss_cfg.get('auto_weight', False)
+                    
+                    if auto_weight:
+                        if hasattr(self._datamodule.train_dataset, 'class_weights'):
+                            class_weights = self._datamodule.train_dataset.class_weights
+                            init_args['weight'] = class_weights
+                            
+                            # 格式化权重显示
+                            weights_str = ", ".join([f"{w:.4f}" for w in class_weights])
+                            log_info(f"[{loss_name}] 已启用 auto_weight: 自动注入类别权重")
+                            log_info(f"[{loss_name}] 类别权重: {Colors.YELLOW}[{weights_str}]{Colors.RESET}")
+                        else:
+                            log_warning(f"[{loss_name}] 启用了 auto_weight 但数据集不支持计算权重")
+                    
+                    # 旧逻辑兼容 (可选，如果想彻底废弃旧逻辑可以删除)
+                    elif 'weight' not in init_args and hasattr(self._datamodule.train_dataset, 'class_weights'):
+                        # 只有在没有显式设置 auto_weight=False 时才触发隐式注入
+                        if 'auto_weight' not in loss_cfg:
+                            class_weights = self._datamodule.train_dataset.class_weights
+                            init_args['weight'] = class_weights
+                            
+                            # 格式化权重显示
+                            weights_str = ", ".join([f"{w:.4f}" for w in class_weights])
+                            log_info(f"[{loss_name}] 隐式自动注入类别权重 (建议使用 auto_weight: true 显式开启)")
+                            log_info(f"[{loss_name}] 类别权重: {Colors.YELLOW}[{weights_str}]{Colors.RESET}")
         
         # 获取 task 初始化参数
         task_init_args = task_config.get('init_args', {})
@@ -303,3 +337,13 @@ class SemanticSegmentationEngine(BaseEngine):
             '输出目录': self.config.output_dir,
             'Checkpoint': self.config.checkpoint_path or 'N/A',
         }, "运行配置")
+
+        # 记录完整配置
+        from ..utils.logger import print_section, log_warning
+        print_section("完整配置")
+        try:
+            import yaml
+            print(yaml.dump(self.config.to_dict(), allow_unicode=True, default_flow_style=False, sort_keys=False))
+        except ImportError:
+            log_warning("未安装 PyYAML，无法打印完整配置 YAML")
+            print(self.config.to_dict())

@@ -47,7 +47,7 @@ def parse_args():
     parser.add_argument(
         '--config', '-c',
         type=str,
-        default='configs/experiments/dales_semseg.yaml',
+        default='configs/experiments/dales_semseg_standalone.yaml',
         help='实验配置文件路径 (YAML)'
     )
     

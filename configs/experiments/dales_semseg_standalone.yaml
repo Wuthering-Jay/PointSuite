@@ -1,0 +1,301 @@
+# ════════════════════════════════════════════════════════════════════════════
+# DALES 语义分割完整配置 (Standalone Configuration)
+# ════════════════════════════════════════════════════════════════════════════
+# 
+# 这是一个独立的、包含所有参数的配置文件，不再依赖 defaults 引用。
+# 适合需要完全控制所有细节的高级用户。
+#
+# 使用方式:
+#   python main.py --config configs/experiments/dales_semseg_standalone.yaml
+# ════════════════════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════════════════════════════════════════
+# 运行配置 (Run Configuration)
+# ════════════════════════════════════════════════════════════════════════════
+run:
+  # 运行模式:
+  #   - train: 训练 -> 验证 -> 测试
+  #   - resume: 恢复训练 -> 验证 -> 测试
+  #   - finetune: 加载权重微调 -> 验证 -> 测试
+  #   - test: 仅测试
+  #   - predict: 仅预测
+  #   - full: 训练 -> 验证 -> 测试 -> 预测
+  mode: train
+  
+  # 随机种子
+  seed: 42
+  
+  # 输出目录
+  output_dir: ./outputs/dales_semseg_standalone
+  
+  # 检查点路径 (resume/finetune/test/predict 模式必须指定)
+  # checkpoint_path: E:\code\python\PointSuite\outputs\dales_semseg_standalone\checkpoints\epoch=19-mean_iou=0.7413.ckpt
+  checkpoint_path: null
+
+# ════════════════════════════════════════════════════════════════════════════
+# 数据配置 (Data Configuration)
+# ════════════════════════════════════════════════════════════════════════════
+data:
+  # 数据路径
+  paths:
+    train: E:/data/DALES/dales_las/bin/train
+    val: E:/data/DALES/dales_las/bin/test
+    test: E:/data/DALES/dales_las/bin/test
+    predict: E:/data/DALES/dales_las/bin/test
+
+  # 类别信息
+  classes:
+    mapping: [1, 2, 3, 4, 5, 6, 7, 8]
+    names: ['地面', '植被', '车辆', '卡车', '电线', '篱笆', '杆状物', '建筑']
+    num_classes: 8
+    ignore_label: -1
+
+  # 数据加载器配置
+  loader:
+    # 属性字段配置
+    assets: ['coord', 'class', 'echo']
+    
+    batch_size: 4
+    num_workers: 4
+    pin_memory: true
+    prefetch_factor: 2
+    persistent_workers: true
+    
+    # 采样模式: 'grid' (推荐) 或 'full'
+    mode: grid
+    max_loops: null
+    
+    # 动态批处理 (推荐开启以节省显存)
+    dynamic_batch:
+      enabled: false
+      max_points_train: 125000
+      max_points_inference: 200000
+      
+    # 训练循环次数 (Epoch 放大倍数)
+    loop:
+      train: 5
+      val: 5
+      test: 1
+      predict: 1
+
+  # 数据增强
+  transforms:
+    # 训练增强
+    train:
+      - class_path: CentroidShift
+        init_args:
+          apply_z: true
+      - class_path: RandomDropout
+        init_args:
+          dropout_ratio: 0.2
+          p: 0.2
+      - class_path: RandomRotate
+        init_args:
+          angle: [-1,1]
+          axis: z
+          center: [0, 0, 0]
+          p: 0.5
+      - class_path: RandomFlip
+        init_args:
+          p: 0.5
+      - class_path: RandomScale
+        init_args:
+          scale: [0.9, 1.1]
+      - class_path: RandomJitter
+        init_args:
+          sigma: 0.005
+          clip: 0.02
+      - class_path: ToTensor
+      - class_path: Collect
+        init_args:
+          keys: ["coord", "class", "echo"]
+          feat_keys: 
+            feat: ["coord", "echo"]
+          
+    # 验证/测试增强 (通常只做体素化和归一化)
+    val:
+      - class_path: CentroidShift
+        init_args:
+          apply_z: true
+      - class_path: RandomDropout
+        init_args:
+          dropout_ratio: 0.2
+          p: 0.2
+      - class_path: RandomRotate
+        init_args:
+          angle: [-1,1]
+          axis: z
+          center: [0, 0, 0]
+          p: 0.5
+      - class_path: RandomFlip
+        init_args:
+          p: 0.5
+      - class_path: RandomScale
+        init_args:
+          scale: [0.9, 1.1]
+      - class_path: RandomJitter
+        init_args:
+          sigma: 0.005
+          clip: 0.02
+      - class_path: ToTensor
+      - class_path: Collect
+        init_args:
+          keys: ["coord", "class", "echo"]
+          feat_keys: 
+            feat: ["coord", "echo"]
+          
+    test:
+      - class_path: CentroidShift
+        init_args:
+          apply_z: true
+      - class_path: ToTensor
+      - class_path: Collect
+        init_args:
+          keys: ["coord", "class", "echo"]
+          feat_keys: 
+            feat: ["coord", "echo"]
+          
+    predict:
+      - class_path: CentroidShift
+        init_args:
+          apply_z: true
+      - class_path: ToTensor
+      - class_path: Collect
+        init_args:
+          keys: ["coord", "echo", 'indices', 'bin_file', 'bin_path', 'pkl_path']
+          feat_keys: 
+            feat: ["coord", "echo"]
+
+# ════════════════════════════════════════════════════════════════════════════
+# 模型配置 (Model Configuration)
+# ════════════════════════════════════════════════════════════════════════════
+model:
+  # Backbone: PointTransformerV2
+  backbone:
+    class_path: PointTransformerV2
+    init_args:
+      in_channels: 5  # coord(3) + echo(2)
+      patch_embed_depth: 1
+      patch_embed_channels: 24
+      patch_embed_groups: 6
+      patch_embed_neighbours: 24
+      enc_depths: [2, 2, 2, 2]
+      enc_channels: [48, 96, 192, 256]
+      enc_groups: [6, 12, 24, 32]
+      enc_neighbours: [32, 32, 32, 32]
+      dec_depths: [1, 1, 1, 1]
+      dec_channels: [24, 48, 96, 192]
+      dec_groups: [4, 6, 12, 24]
+      dec_neighbours: [32, 32, 32, 32]
+      grid_sizes: [1.5, 3.75, 9.375, 23.4375]
+      attn_qkv_bias: true
+      pe_multiplier: false
+      pe_bias: true
+      attn_drop_rate: 0.0
+      drop_path_rate: 0.3
+      unpool_backend: interp
+
+  # Head: Segmentation Head
+  head:
+    class_path: SegHead
+    init_args:
+      in_channels: 24
+      num_classes: ${data.classes.num_classes}
+
+# ════════════════════════════════════════════════════════════════════════════
+# 任务配置 (Task Configuration)
+# ════════════════════════════════════════════════════════════════════════════
+task:
+  class_path: SemanticSegmentationTask
+  init_args:
+    learning_rate: 0.001
+    class_mapping: ${data.classes.mapping}
+    class_names: ${data.classes.names}
+    ignore_label: ${data.classes.ignore_label}
+
+# ════════════════════════════════════════════════════════════════════════════
+# 损失函数配置 (Loss Configuration)
+# ════════════════════════════════════════════════════════════════════════════
+losses:
+  # 1. Cross Entropy Loss
+  - name: ce_loss
+    class_path: CrossEntropyLoss
+    init_args:
+      ignore_index: ${data.classes.ignore_label}
+    auto_weight: true
+    loss_weight: 1.0
+    
+  # 2. Lovasz Loss
+  # - name: lovasz_loss
+  #   class_path: pointsuite.models.losses.LovaszLoss
+  #   init_args:
+  #     ignore_index: ${data.classes.ignore_label}
+  #     mode: multiclass
+  #   loss_weight: 1.0
+
+# ════════════════════════════════════════════════════════════════════════════
+# 指标配置 (Metrics Configuration)
+# ════════════════════════════════════════════════════════════════════════════
+metrics:
+  - name: seg_metrics
+    class_path: SegmentationMetrics
+    init_args:
+      num_classes: ${data.classes.num_classes}
+      ignore_index: ${data.classes.ignore_label}
+      class_names: ${data.classes.names}
+
+# ════════════════════════════════════════════════════════════════════════════
+# 训练器配置 (Trainer Configuration)
+# ════════════════════════════════════════════════════════════════════════════
+trainer:
+  training:
+    max_epochs: 10
+    devices: 1
+    accelerator: auto
+    precision: 16-mixed
+    accumulate_grad_batches: 1
+    gradient_clip_val: null
+    
+  optimizer:
+    class_path: torch.optim.AdamW
+    init_args:
+      lr: ${task.init_args.learning_rate}
+      weight_decay: 1e-4
+      
+  lr_scheduler:
+    class_path: torch.optim.lr_scheduler.CosineAnnealingLR
+    init_args:
+      # T_max: 自动计算 (total_steps)
+      eta_min: 1.0e-5
+    interval: step
+
+  callbacks:
+    model_checkpoint:
+      class_path: ModelCheckpoint
+      init_args:
+        monitor: mean_iou
+        mode: max
+        save_top_k: 1
+        save_last: true
+        filename: 'best-epoch={epoch:02d}-mean_iou={mean_iou:.4f}'
+        auto_insert_metric_name: false
+        
+    early_stopping:
+      class_path: EarlyStopping
+      init_args:
+        monitor: mean_iou
+        patience: 15
+        mode: max
+        
+    lr_monitor:
+      class_path: LearningRateMonitor
+      init_args:
+        logging_interval: step
+
+    predict_writer:
+      enabled: true
+      class_path: SemanticPredictLasWriter
+      init_args:
+        output_dir: ${run.output_dir}/predictions
+        save_logits: false
+        auto_infer_reverse_mapping: true

@@ -85,6 +85,8 @@ class BaseTask(pl.LightningModule):
         # --- 1. 动态实例化损失函数 ---
         self.losses = nn.ModuleDict()
         self.loss_weights = {}
+        self.loss_sources = {}  # 存储每个 loss 的输入源
+        
         if loss_configs:
             for cfg in loss_configs:
                 # 'loss_name' 是我们给这个损失起的名字，例如 'focal_loss'
@@ -93,7 +95,10 @@ class BaseTask(pl.LightningModule):
                 init_args = cfg.get("init_args", {})
                 
                 self.losses[loss_name] = loss_class(**init_args)
-                self.loss_weights[loss_name] = cfg.get("weight", 1.0)
+                # 优先使用 'loss_weight'，兼容旧版 'weight'
+                self.loss_weights[loss_name] = cfg.get("loss_weight", cfg.get("weight", 1.0))
+                # 获取输入源，默认为 None (自动推断)
+                self.loss_sources[loss_name] = cfg.get("loss_source", None)
                 
         # --- 2. 动态实例化指标 ---
         # 我们使用 ModuleDict 来确保指标被正确移动到 GPU
@@ -204,8 +209,24 @@ class BaseTask(pl.LightningModule):
                     batch_fp32[k] = v
             
             for name, loss_fn in self.losses.items():
+                # 确定输入源
+                source_key = self.loss_sources.get(name)
+                input_preds = preds
+                
+                if isinstance(preds, dict):
+                    if source_key:
+                        # 如果指定了 source，直接获取 (如果不存在则报错，或者返回 None?)
+                        # 这里假设用户配置正确，直接获取
+                        input_preds = preds.get(source_key)
+                        if input_preds is None:
+                            raise ValueError(f"Loss '{name}' requested source '{source_key}', but it was not found in predictions.")
+                    elif 'logits' in preds:
+                        # 默认情况：如果有 logits，使用 logits (兼容标准 Loss)
+                        input_preds = preds['logits']
+                    # else: 没有指定 source 且没有 logits，传递整个 dict
+                
                 # 损失函数接收 (preds, batch)
-                loss = loss_fn(preds, batch_fp32)
+                loss = loss_fn(input_preds, batch_fp32)
                 # 确保 loss 也是 FP32
                 if loss.dtype != torch.float32:
                     loss = loss.float()
@@ -357,6 +378,10 @@ class BaseTask(pl.LightningModule):
             gc.collect()
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+        
+        # 强制清理系统内存
+        import gc
+        gc.collect()
     
     def on_validation_start(self):
         """
@@ -367,6 +392,10 @@ class BaseTask(pl.LightningModule):
             gc.collect()
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+        
+        # 强制清理系统内存
+        import gc
+        gc.collect()
     
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
         # 1. 前向传播

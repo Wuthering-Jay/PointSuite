@@ -31,11 +31,11 @@ def get_engine_class(task_type: str):
     """
     task_type = task_type.lower().replace('-', '_')
     
-    if task_type in ['semantic_segmentation', 'semseg', 'segmentation']:
+    if task_type in ['semantic_segmentation', 'semseg', 'segmentation', 'sem_seg']:
         return SemanticSegmentationEngine
-    elif task_type in ['instance_segmentation', 'insseg']:
+    elif task_type in ['instance_segmentation', 'insseg', 'ins_seg']:
         return InstanceSegmentationEngine
-    elif task_type in ['object_detection', 'detection', 'det']:
+    elif task_type in ['object_detection', 'detection', 'det', 'obj_det']:
         return ObjectDetectionEngine
     else:
         raise ValueError(

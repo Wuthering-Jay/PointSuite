@@ -820,10 +820,10 @@ class LASProcessorLogicalIndex:
 if __name__ == "__main__":
     # 示例用法
     processor = LASProcessorLogicalIndex(
-        input_path=r"E:\data\DALES\dales_las\test",
-        output_dir=r"E:\data\DALES\dales_las\bin_logical\test",
+        input_path=r"E:\data\DALES\dales_las\train",
+        output_dir=r"E:\data\DALES\dales_las\bin\train",
         window_size=(50.0, 50.0),
-        overlap_factor=2,
+        overlap_factor=1,
         grid_size=0.5,     # 统一 Grid Size
         min_points=5000,
         max_points=None,

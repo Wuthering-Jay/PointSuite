@@ -19,10 +19,10 @@
 # ════════════════════════════════════════════════════════════════════════════
 # 必须在 experiment yaml 中配置或覆盖
 paths:
-  train: null      # 训练数据目录 (包含 .bin 和 .pkl 文件)
-  val: null        # 验证数据目录
-  test: null       # 测试数据目录
-  predict: null    # 预测数据目录
+  train: E:\data\DALES\dales_las\bin\train      # 训练数据目录 (包含 .bin 和 .pkl 文件)
+  val: E:\data\DALES\dales_las\bin\test        # 验证数据目录
+  test: E:\data\DALES\dales_las\bin\test       # 测试数据目录
+  predict: E:\data\DALES\dales_las\bin\test    # 预测数据目录
 
 # ════════════════════════════════════════════════════════════════════════════
 # 类别配置 (Class Configuration)
@@ -108,8 +108,8 @@ loader:
   # 循环次数: 每个 epoch 重复遍历数据集的次数
   # 相当于数据增强倍数，增加训练样本多样性
   loop:
-    train: 5     # 训练时循环 5 次
-    val: 5       # 验证时循环 5 次
+    train: 1     # 训练时循环 5 次
+    val: 1       # 验证时循环 5 次
     test: 1      # 测试时不循环
     predict: 1   # 预测时不循环
 

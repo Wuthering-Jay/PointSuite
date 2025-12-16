@@ -137,7 +137,14 @@ class SemanticSegmentationTask(BaseTask):
         
         # 3. Head 生成 logits
         logits = self.head(features)
-        return logits
+        
+        # 返回字典以支持辅助损失 (Auxiliary Loss)
+        # 'logits': 标准输出
+        # 'features': Head 之前的特征 (Backbone 输出)
+        return {
+            'logits': logits,
+            'features': features
+        }
 
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         """

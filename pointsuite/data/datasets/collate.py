@@ -93,6 +93,14 @@ def collate_fn(batch):
     elif isinstance(batch[0], str):
         return list(batch)
     elif isinstance(batch[0], Sequence):
+        # 处理 GridSample(test mode) 返回的 list of dicts
+        # 这种情况下，每个样本被分割成了多个部分，我们将它们展平合并为一个大的 batch
+        if len(batch[0]) > 0 and isinstance(batch[0][0], Mapping):
+            flattened_batch = []
+            for sample in batch:
+                flattened_batch.extend(sample)
+            return collate_fn(flattened_batch)
+            
         for data in batch:
             # data[0] 是点级字段（如 coord），append 每个样本的点数
             data.append(torch.tensor([data[0].shape[0]]))
