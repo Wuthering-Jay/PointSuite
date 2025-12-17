@@ -27,7 +27,7 @@ class Block(nn.Module):
         norm_layer=PointBatchNorm,
     ):
         super(Block, self).__init__()
-        self.attn = DynamicGatedAttention(
+        self.attn = GroupedVectorAttention(
             embed_channels=embed_channels,
             groups=groups,
             qkv_bias=qkv_bias,
@@ -52,7 +52,7 @@ class Block(nn.Module):
         coord, feat, offset = points # [n,3], [n,c], [b]
         identity = feat # [n, c]
         feat = self.act(self.norm1(self.fc1(feat))) # [n, c]
-        feat = self.attn(feat, coord, reference_index) # [n, c]
+        feat = self.attn(feat, coord, offset, reference_index) # [n, c]
         feat = self.act(self.norm2(feat)) # [n, c]
         feat = self.norm3(self.fc3(feat)) # [n, c]
         feat = identity + self.drop_path(feat) # [n, c], bottleneck设计

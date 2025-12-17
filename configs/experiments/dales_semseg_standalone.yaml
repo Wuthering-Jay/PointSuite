@@ -20,7 +20,7 @@ run:
   #   - test: 仅测试
   #   - predict: 仅预测
   #   - full: 训练 -> 验证 -> 测试 -> 预测
-  mode: full
+  mode: train
   
   # 随机种子
   seed: 42
